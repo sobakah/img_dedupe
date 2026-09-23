@@ -29,17 +29,42 @@ To avoid damaging series names, this only happens when another file in the same 
 
 ## Installation
 
-Python 3.9+. The dependencies (Pillow, send2trash; pyreadline3 on Windows) are installed automatically.
+Python 3.9+ and [pipx](https://pipx.pypa.io/). The dependencies (Pillow, send2trash; pyreadline3 on Windows) are installed automatically. pipx is the easiest route on distributions that block global `pip install` (PEP 668, e.g. Fedora: `sudo dnf install pipx`).
+
+### From GitHub (recommended)
+
+No clone needed; pipx fetches the repository, builds it, and puts the `img_dedupe` command on your PATH:
+
+```bash
+pipx install git+https://github.com/<username>/img_dedupe.git
+```
+
+With JPEG XL support (the quotes are needed because of the brackets):
+
+```bash
+pipx install "img-dedupe[jxl] @ git+https://github.com/<username>/img_dedupe.git"
+```
+
+A specific release or branch goes after an `@` at the end of the URL, e.g. `...img_dedupe.git@v2.2.0`.
+
+| Task | Command |
+|---|---|
+| Update to the latest commit | `pipx reinstall img-dedupe` |
+| Uninstall | `pipx uninstall img-dedupe` |
+
+Note that the pipx name is `img-dedupe` (with a hyphen), while the command is `img_dedupe`. `pipx upgrade img-dedupe` only installs something new when the version number went up; `pipx reinstall` always fetches the latest commit.
+
+If `img_dedupe` is not found after installing, run `pipx ensurepath` once and open a new terminal.
+
+### From a local clone
 
 ```bash
 git clone https://github.com/<username>/img_dedupe.git
 cd img_dedupe
-
-pipx install .                 # recommended: isolated, puts `img_dedupe` on your PATH
-pipx install ".[jxl]"          # the same, plus JPEG XL support
+pipx install .                 # or: pipx install ".[jxl]"
 ```
 
-`pipx` is the easiest route on distributions that block global `pip install` (PEP 668, e.g. Fedora); `pip install --user .` works too where that is allowed. To update after `git pull`, run `pipx install --force .`.
+To update, `git pull` and then `pipx install --force .`.
 
 **For development**, use an editable install; changes to the code take effect immediately:
 
@@ -54,7 +79,7 @@ AVIF is read natively by recent Pillow versions. Without the JXL extra, `.jxl` f
 
 ### Where files are kept
 
-| | Running from the project folder (`python3 -m img_dedupe`, `pip install -e .`) | Regular install (`pipx install .`) |
+| | Running from the project folder (`python3 -m img_dedupe`, `pip install -e .`) | Installed with pipx (from GitHub or a clone) |
 |---|---|---|
 | Config | `config.json` in the project folder, else `~/.config/img_dedupe/config.json` | `~/.config/img_dedupe/config.json` |
 | Log | `img_dedupe.log` in the project folder | `~/.local/state/img_dedupe/img_dedupe.log` |
@@ -189,6 +214,17 @@ Measured on test images: re-saves, format conversions and downscaled copies scor
 * scans too slow on a big folder → lower `compare_size` to 384.
 
 Always check a change with `--dry-run` first.
+
+## Releasing a new version
+
+Raise `__version__` in `img_dedupe/config.py` (it is the single source of the version, `pyproject.toml` reads it from there), commit, and tag the release so it can be pinned:
+
+```bash
+git tag v2.3.0
+git push && git push --tags
+```
+
+Without the version bump, `pipx upgrade img-dedupe` will not see the new commit (`pipx reinstall` still will).
 
 ## Known limitations
 
