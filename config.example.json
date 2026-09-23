@@ -1,0 +1,27 @@
+{
+    "delete_mode": "trash",
+    "viewer": "auto",
+    "confirm": "uncertain",
+    "strictness": "normal",
+    "max_pixel_diff": null,
+    "uncertain_ratio": 0.6,
+    "compare_size": 512,
+    "max_aspect_diff": 0.02,
+    "hash_size": 8,
+    "hash_max_distance": 28,
+    "color": "auto",
+    "rename_numbered": true,
+    "save_sessions": true,
+    "log_file": null,
+    "format_ranks": {
+        "JXL": 6,
+        "WEBP": 5,
+        "AVIF": 4,
+        "PNG": 3,
+        "TIFF": 3,
+        "JPEG": 2,
+        "JPG": 2,
+        "GIF": 1,
+        "BMP": 0
+    }
+}

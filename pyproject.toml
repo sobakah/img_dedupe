@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "img-dedupe"
+dynamic = ["version"]
+description = "Find exact and visually identical duplicate images and remove the redundant copies, keeping the best one."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "Pillow>=10.0",
+    "send2trash",
+    "pyreadline3; sys_platform == 'win32'",  # Tab completion and prefilled prompts on Windows
+]
+keywords = ["duplicates", "images", "photos", "dedupe", "perceptual-hash", "cli"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Graphics",
+    "Topic :: Utilities",
+]
+
+[project.optional-dependencies]
+jxl = ["pillow-jxl-plugin"]  # read .jxl files in Stage 2
+
+[project.scripts]
+img_dedupe = "img_dedupe.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/sobakah/img_dedupe"
+
+[tool.setuptools]
+packages = ["img_dedupe"]
+
+[tool.setuptools.dynamic]
+version = { attr = "img_dedupe.config.__version__" }
