@@ -45,7 +45,7 @@ With JPEG XL support (the quotes are needed because of the brackets):
 pipx install "img-dedupe[jxl] @ git+https://github.com/sobakah/img_dedupe.git"
 ```
 
-A specific release or branch goes after an `@` at the end of the URL, e.g. `...img_dedupe.git@v2.2.0`.
+A specific release or branch goes after an `@` at the end of the URL, e.g. `...img_dedupe.git@v1.0`.
 
 | Task | Command |
 |---|---|
@@ -156,7 +156,7 @@ After the groups are found, the review is saved after every step, so an accident
 Every change to your files is appended to `img_dedupe.log` (in the project folder, or `~/.local/state/img_dedupe/` for a regular install; see *Where files are kept*): one line per file, with time, action, full path, the file that was kept instead, and why (exact copy or visual match with its score, and whether it was automatic or confirmed by you). Each run gets a START and END line; the summary shows the log's path.
 
 ```
-2026-09-23 20:39:37 | START    | img_dedupe 2.1.0 · folder /pics · mode trash · limit 20 (normal) · new scan
+2026-09-23 20:39:37 | START    | img_dedupe 1.0 · folder /pics · mode trash · limit 20 (normal) · new scan
 2026-09-23 20:39:37 | TRASHED  | /pics/a (1).png | kept /pics/a.png | exact copy (identical bytes), automatic
 2026-09-23 20:39:37 | TRASHED  | /pics/photo.jpg | kept /pics/photo (1).jpg | visual match (worst diff 5/20), automatic
 2026-09-23 20:39:37 | RENAMED  | /pics/photo (1).jpg | new name /pics/photo.jpg
@@ -220,7 +220,7 @@ Always check a change with `--dry-run` first.
 Raise `__version__` in `scripts/config.py` (it is the single source of the version, `pyproject.toml` reads it from there), commit, and tag the release so it can be pinned:
 
 ```bash
-git tag v2.3.0
+git tag v1.1
 git push && git push --tags
 ```
 
