@@ -36,13 +36,13 @@ Python 3.9+ and [pipx](https://pipx.pypa.io/). The dependencies (Pillow, send2tr
 No clone needed; pipx fetches the repository, builds it, and puts the `img_dedupe` command on your PATH:
 
 ```bash
-pipx install git+https://github.com/<username>/img_dedupe.git
+pipx install git+https://github.com/sobakah/img_dedupe.git
 ```
 
 With JPEG XL support (the quotes are needed because of the brackets):
 
 ```bash
-pipx install "img-dedupe[jxl] @ git+https://github.com/<username>/img_dedupe.git"
+pipx install "img-dedupe[jxl] @ git+https://github.com/sobakah/img_dedupe.git"
 ```
 
 A specific release or branch goes after an `@` at the end of the URL, e.g. `...img_dedupe.git@v2.2.0`.
@@ -59,7 +59,7 @@ If `img_dedupe` is not found after installing, run `pipx ensurepath` once and op
 ### From a local clone
 
 ```bash
-git clone https://github.com/<username>/img_dedupe.git
+git clone https://github.com/sobakah/img_dedupe.git
 cd img_dedupe
 pipx install .                 # or: pipx install ".[jxl]"
 ```
