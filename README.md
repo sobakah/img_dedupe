@@ -73,13 +73,13 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[jxl]"
 ```
 
-Without installing at all, `python3 -m img_dedupe` works from the project folder once Pillow and send2trash are available.
+Without installing at all, `python3 -m scripts` works from the project folder once Pillow and send2trash are available. (The code lives in the `scripts/` folder; installed, it is the Python package `img_dedupe`.)
 
 AVIF is read natively by recent Pillow versions. Without the JXL extra, `.jxl` files are still covered by Stage 1, and Stage 2 reports them as unreadable instead of silently skipping them.
 
 ### Where files are kept
 
-| | Running from the project folder (`python3 -m img_dedupe`, `pip install -e .`) | Installed with pipx (from GitHub or a clone) |
+| | Running from the project folder (`python3 -m scripts`, `pip install -e .`) | Installed with pipx (from GitHub or a clone) |
 |---|---|---|
 | Config | `config.json` in the project folder, else `~/.config/img_dedupe/config.json` | `~/.config/img_dedupe/config.json` |
 | Log | `img_dedupe.log` in the project folder | `~/.local/state/img_dedupe/img_dedupe.log` |
@@ -217,7 +217,7 @@ Always check a change with `--dry-run` first.
 
 ## Releasing a new version
 
-Raise `__version__` in `img_dedupe/config.py` (it is the single source of the version, `pyproject.toml` reads it from there), commit, and tag the release so it can be pinned:
+Raise `__version__` in `scripts/config.py` (it is the single source of the version, `pyproject.toml` reads it from there), commit, and tag the release so it can be pinned:
 
 ```bash
 git tag v2.3.0

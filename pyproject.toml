@@ -33,7 +33,10 @@ img_dedupe = "img_dedupe.cli:main"
 Homepage = "https://github.com/sobakah/img_dedupe"
 
 [tool.setuptools]
+# The code lives in the scripts/ folder of the repository but is installed
+# as the Python package "img_dedupe".
 packages = ["img_dedupe"]
+package-dir = { img_dedupe = "scripts" }
 
 [tool.setuptools.dynamic]
 version = { attr = "img_dedupe.config.__version__" }
