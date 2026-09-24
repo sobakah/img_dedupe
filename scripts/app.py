@@ -11,11 +11,11 @@ from pathlib import Path, PurePosixPath
 from .config import __version__
 from .core_logic import (ExactGroup, Group, RunContext, Stats, UserQuit,
                         apply_dry_run, find_exact_duplicates, find_similar_images,
-                        format_size, mode_badge, resolve_limit, resume_review,
-                        review_dry_run_again)
+                        dry_run_from_session, format_size, mode_badge, planned_changes,
+                        resolve_limit, resume_review, review_dry_run_again)
 from .image_utils import IMAGE_EXTENSIONS, STRICTNESS_PRESETS
 from .session import ActionLog, SessionStore, resolve_log_path
-from .ui import (StyleUI, confirm, dim, disable_path_completion, display_width,
+from .ui import (StyleUI, badge, confirm, dim, disable_path_completion, display_width,
                 enable_path_completion, error, exit_script, info, pad,
                 print_banner, print_menu, print_primary_action, safe_input,
                 success, terminal_width, transient, truncate, warn)
@@ -291,32 +291,56 @@ def matching_settings(config: dict, settings: dict, target: Path, index: FolderI
             "description": f"{preset} ({limit}) · {folders}"}
 
 
-def _session_panel(saved: dict) -> int:
-    """Describe a saved session; returns the number of open groups."""
+def session_state(saved: dict) -> tuple[bool, bool, int]:
+    """(is a dry run, dry run finished, open groups) of a saved session."""
+    open_ = sum(g["status"] != "done" for g in saved["groups"])
+    dry = bool(saved.get("dry_run"))
+    return dry, dry and (bool(saved.get("finished")) or open_ == 0), open_
+
+
+def saved_dry_run(saved: dict, rename: bool) -> "DryRun":
+    exact, groups = dry_run_from_session(saved)
+    result = DryRun(exact_groups=exact, groups=groups, scanned=int(saved.get("scanned", 0)))
+    result.to_remove, result.to_rename = planned_changes(exact, groups, rename)
+    return result
+
+
+def _session_panel(saved: dict, rename: bool) -> None:
     groups = saved["groups"]
     done = sum(g["status"] == "done" for g in groups)
     skipped = sum(g["status"] == "skipped" for g in groups)
-    open_ = len(groups) - done
+    dry, finished, open_ = session_state(saved)
     try:
         when = datetime.fromisoformat(saved.get("updated", "")).strftime("%d %b %Y %H:%M")
     except ValueError:
         when = "earlier"
-    print(f"\n{StyleUI.BOLD}Saved session:{StyleUI.RESET} {badge_open(open_)} from {when} · "
-          f"{len(groups)} groups: {StyleUI.GREEN}{done} done{StyleUI.RESET} · "
-          f"{StyleUI.YELLOW}{skipped} skipped{StyleUI.RESET} · {open_ - skipped} open")
+    kind = badge("DRY RUN", StyleUI.CYAN) + " " if dry else ""
+    if finished:
+        plan = saved_dry_run(saved, rename)
+        text = (f"{kind}{badge('FINISHED', StyleUI.GREEN)} from {when} · {len(groups)} group(s) · "
+                f"{plan.to_remove} file(s) to remove, {plan.to_rename} to rename")
+    else:
+        text = (f"{kind}{badge('RESUMABLE', StyleUI.CYAN)} from {when} · {len(groups)} groups: "
+                f"{StyleUI.GREEN}{done} done{StyleUI.RESET} · {StyleUI.YELLOW}{skipped} skipped{StyleUI.RESET} · "
+                f"{open_ - skipped} open")
+    print(f"\n{StyleUI.BOLD}Saved session:{StyleUI.RESET} {text}")
     description = saved.get("matching", {}).get("description")
     if description:
         dim(f"               Matched with: {description}. Settings 1, 2, r and f only affect new scans.")
-    return open_
 
 
-def badge_open(count: int) -> str:
-    return f"{StyleUI.CYAN}{StyleUI.BOLD}[RESUMABLE]{StyleUI.RESET}" if count else ""
+def _fate(mode: str, count: int) -> str:
+    return {"trash": f"move {count} file(s) to the trash",
+            "permanent": f"permanently delete {count} file(s)"}.get(mode, f"remove {count} file(s)")
 
 
 def start_screen(target: Path, config: dict, settings: dict, index: FolderIndex,
                  store: SessionStore | None) -> tuple[str, dict | None]:
-    """Show folder, saved session and settings. Returns ('start'|'resume'|'change', saved)."""
+    """Show folder, saved session and settings.
+
+    Returns (action, saved session) with action one of 'start', 'resume',
+    'apply_saved', 'review_saved' or 'change'.
+    """
     while True:
         saved = store.load() if store else None
         counts = index.folder_counts(target)
@@ -330,7 +354,12 @@ def start_screen(target: Path, config: dict, settings: dict, index: FolderIndex,
             scope += f" {StyleUI.GRAY}({total - direct} more in subfolders - press r){StyleUI.RESET}"
         print(f"{StyleUI.BOLD}Images:{StyleUI.RESET}  {scope}")
 
-        open_groups = _session_panel(saved) if saved else 0
+        if saved:
+            _session_panel(saved, config["rename_numbered"])
+            saved_dry, saved_finished, open_groups = session_state(saved)
+        else:
+            saved_dry = saved_finished = False
+            open_groups = 0
 
         limit, preset = resolve_limit(config)
         mode = config["delete_mode"]
@@ -353,11 +382,18 @@ def start_screen(target: Path, config: dict, settings: dict, index: FolderIndex,
                     else f"{StyleUI.BOLD}{chosen} of {len(entries)} folders{StyleUI.RESET}")
             _info_row("f", "Folders", f"{text} {StyleUI.GRAY}- press f to choose{StyleUI.RESET}")
         print(f"  {StyleUI.GRAY}{' ' * (_LABEL_WIDTH + 5)}Press a setting's key to switch to the next choice.{StyleUI.RESET}")
-        if mode == "dry_run" and store is not None:
-            dim(f"  {' ' * (_LABEL_WIDTH + 3)}Dry runs are not saved as sessions and not logged.")
+        if mode == "dry_run":
+            dim(f"  {' ' * (_LABEL_WIDTH + 3)}Dry runs change nothing and are not logged; their progress is saved.")
 
-        if saved and open_groups:
-            print_primary_action("Enter", f"Resume saved session ({open_groups} open group(s))")
+        if saved and saved_finished:
+            plan = saved_dry_run(saved, config["rename_numbered"])
+            what = _fate(real_delete_mode(config), plan.to_remove)
+            if plan.to_rename:
+                what += f", rename {plan.to_rename}"
+            print_primary_action("Enter", f"Carry out the saved dry run: {what}")
+        elif saved and open_groups:
+            label = "dry run" if saved_dry else "session"
+            print_primary_action("Enter", f"Resume saved {label} ({open_groups} open group(s))")
         elif in_scope < 2:
             warn("\nFewer than two images in scope - nothing to compare.")
         else:
@@ -368,12 +404,17 @@ def start_screen(target: Path, config: dict, settings: dict, index: FolderIndex,
             settings_menu.append(("f", "Choose folders"))
         groups_menu = [("Settings", settings_menu)]
         if saved:
-            groups_menu.append(("Session", [("x", "Discard saved session"), ("n", "New scan instead of resuming")]))
+            session_menu = [("x", "Discard saved session"), ("n", "New scan instead")]
+            if saved_finished:
+                session_menu.insert(0, ("e", "Review its groups again for real"))
+            groups_menu.append(("Session", session_menu))
         groups_menu.append(("Navigate", [("c", "Change directory"), ("q", "Quit")]))
         print_menu(groups_menu)
 
         choice = safe_input(f"{StyleUI.BOLD}Action: {StyleUI.RESET}").strip().lower()
         if choice == "":
+            if saved and saved_finished:
+                return "apply_saved", saved
             if saved and open_groups:
                 return "resume", saved
             if in_scope >= 2:
@@ -383,6 +424,8 @@ def start_screen(target: Path, config: dict, settings: dict, index: FolderIndex,
             exit_script()
         elif choice == "c":
             return "change", None
+        elif choice == "e" and saved and saved_finished:
+            return "review_saved", saved
         elif choice in ("x", "n") and saved:
             if confirm(f"{StyleUI.YELLOW}Discard the saved session for this folder?{StyleUI.RESET}"):
                 store.delete()
@@ -465,30 +508,34 @@ def run_scan(target: Path, config: dict, settings: dict, index: FolderIndex,
     """Run a new scan, resume a saved one, or carry out a finished dry run.
 
     Returns (stats, quit_requested, dry_run_result). The last one is only set
-    after a dry run that finished normally.
+    after a dry run (new or resumed) that finished normally.
     """
     dry = config["delete_mode"] == "dry_run"
-    if dry:
-        store = None  # a dry run's decisions deleted nothing, so they must not be resumed
-    if from_dry is not None and not review_again:
-        store = None  # applying needs no questions, so there is nothing to resume
+    applying = from_dry is not None and not review_again
+    # Applying asks nothing, so it saves nothing new. The saved dry run is only
+    # deleted once applying has finished, so an interrupted apply can be repeated.
+    ctx_store = None if applying else store
 
     fresh = resume is None and from_dry is None
     files = find_images(target, settings["recursive"], settings["excluded"]) if fresh else []
-    stats = Stats(scanned=from_dry.scanned if from_dry else len(files))
-    found = DryRun(scanned=len(files))
+    if fresh:
+        scanned = len(files)
+    else:
+        scanned = from_dry.scanned if from_dry else int(resume.get("scanned", 0))
+    stats = Stats(scanned=scanned)
     limit, preset = resolve_limit(config)
+    kind = ("resumed dry run" if resume and dry else "resumed session" if resume
+            else "dry run applied" if applying else "dry run reviewed again" if from_dry else "new scan")
     action_log = ActionLog(
         None if dry else resolve_log_path(config["log_file"]),
         f"img_dedupe {__version__} · folder {target} · mode {config['delete_mode']} · "
-        f"limit {limit} ({preset}) · "
-        f"{'resumed session' if resume else 'dry run applied' if from_dry and not review_again else 'dry run reviewed again' if from_dry else 'new scan'}",
+        f"limit {limit} ({preset}) · {kind}",
     )
     ctx = RunContext(
-        action_log, store,
+        action_log, ctx_store,
         matching=resume.get("matching") if resume else matching_settings(config, settings, target, index),
         created=resume.get("created") if resume else None,
-        rename=config["rename_numbered"],
+        rename=config["rename_numbered"], dry=dry, scanned=scanned,
     )
 
     def rel(path: Path) -> str:
@@ -500,7 +547,7 @@ def run_scan(target: Path, config: dict, settings: dict, index: FolderIndex,
     try:
         keep_session = False
         if resume:
-            info(f"\nResuming the saved session for {target}")
+            info(f"\nResuming the saved {'dry run' if dry else 'session'} for {target}")
             keep_session = resume_review(resume, config, settings["confirm"], stats, rel, ctx)
         elif from_dry and review_again:
             info(f"\nReviewing the dry run's groups again for real ({MODE_OPTIONS[config['delete_mode']]}) - no rescan")
@@ -512,13 +559,14 @@ def run_scan(target: Path, config: dict, settings: dict, index: FolderIndex,
         else:
             info(f"\nScanning {len(files)} images in {target}")
             if settings["stages"] in ("1", "both"):
-                remaining, found.exact_groups = find_exact_duplicates(files, config, stats, rel, ctx)
+                remaining, ctx.exact_groups = find_exact_duplicates(files, config, stats, rel, ctx)
             else:
                 remaining = files
             if settings["stages"] in ("2", "both"):
                 if len(remaining) > 1:
-                    keep_session, found.groups = find_similar_images(remaining, config, settings["confirm"],
-                                                                     stats, rel, ctx)
+                    keep_session, groups = find_similar_images(remaining, config, settings["confirm"],
+                                                               stats, rel, ctx)
+                    ctx.groups = groups
                 else:
                     warn("\nNot enough images left for a visual comparison.")
     except UserQuit:
@@ -535,25 +583,35 @@ def run_scan(target: Path, config: dict, settings: dict, index: FolderIndex,
         return stats, True, None
     except KeyboardInterrupt:
         action_log.end(f"interrupted (Ctrl+C) · {_summary_text(stats)}")
-        note = ("Progress saved - run img_dedupe on this folder again to resume."
-                if ctx.has_saved_session else None)
+        note = None
+        if ctx.has_saved_session:
+            note = "Progress saved - run img_dedupe on this folder again to resume."
+        elif applying and store is not None and store.load() is not None:
+            note = ("The saved dry run is still there - carry it out again to finish; "
+                    "files already handled are skipped.")
         print()
         print_summary(stats, config["delete_mode"], action_log, note)
         raise
 
     note = None
-    if store is not None:
+    result = None
+    if dry and from_dry is None:
+        result = DryRun(exact_groups=ctx.exact_groups, groups=ctx.groups or [], scanned=scanned)
+        result.to_remove, result.to_rename = planned_changes(result.exact_groups, result.groups, ctx.rename)
+        if store is not None:
+            if result.has_changes:
+                ctx.save(finished=True)  # kept until it is carried out
+                note = "Dry run saved - it can also be carried out later from the start screen."
+            else:
+                store.delete()
+    elif store is not None:
         if keep_session:
             note = "Session kept - choose this folder again to review the skipped groups."
         else:
             store.delete()
     action_log.end(f"finished · {_summary_text(stats)}")
     print_summary(stats, config["delete_mode"], action_log, note)
-    if dry and fresh:
-        found.to_remove = stats.exact_deleted + stats.similar_deleted
-        found.to_rename = stats.renamed
-        return stats, False, found
-    return stats, False, None
+    return stats, False, result
 
 
 def normalize_excluded(target: Path, folders) -> set[str]:
@@ -603,15 +661,24 @@ def run(initial: Path, base_config: dict, base_settings: dict, auto: bool, exclu
                 success(f"Switched to {target}.")
             continue
 
-        stats, quit_requested, dry_result = run_scan(target, config, settings, index, store,
-                                                     resume=saved if action == "resume" else None)
-        index.clear()  # files were removed or renamed, recount on the next screen
-        if quit_requested:
-            exit_script(1 if stats.failed else 0)
-
         choice = None
-        if dry_result is not None and dry_result.has_changes:
-            choice = continue_after_dry_run(target, config, base_config, settings, index, store, dry_result)
+        if action in ("apply_saved", "review_saved"):
+            stats = carry_out_dry_run(target, config, base_config, settings, index, store,
+                                      saved_dry_run(saved, config["rename_numbered"]),
+                                      review=(action == "review_saved"))
+            if stats is None:  # declined the permanent-deletion question
+                continue
+        else:
+            run_config = config
+            if action == "resume":
+                run_config = {**config, "delete_mode": resume_mode(saved, config)}
+            stats, quit_requested, dry_result = run_scan(target, run_config, settings, index, store,
+                                                         resume=saved if action == "resume" else None)
+            index.clear()  # files were removed or renamed, recount on the next screen
+            if quit_requested:
+                exit_script(1 if stats.failed else 0)
+            if dry_result is not None and dry_result.has_changes:
+                choice = continue_after_dry_run(target, config, base_config, settings, index, store, dry_result)
 
         if choice is None:
             print_primary_action("Enter", "Quit")
@@ -629,6 +696,36 @@ def run(initial: Path, base_config: dict, base_settings: dict, auto: bool, exclu
             exit_script(1 if stats.failed else 0)
 
 
+def resume_mode(saved: dict, config: dict) -> str:
+    """A session continues the way it was started: a dry run as a dry run, a
+    real run never as a dry run (its earlier deletions already happened)."""
+    if saved.get("dry_run"):
+        mode = "dry_run"
+        if config["delete_mode"] != mode:
+            info("The saved session is a dry run, so it continues as a dry run.")
+    else:
+        mode = config["delete_mode"] if config["delete_mode"] != "dry_run" else real_delete_mode(config)
+        if config["delete_mode"] == "dry_run":
+            info(f"The saved session is a real run, so it continues with: {MODE_OPTIONS[mode]}.")
+    return mode
+
+
+def carry_out_dry_run(target: Path, config: dict, base_config: dict, settings: dict,
+                      index: FolderIndex, store, dry: DryRun, review: bool) -> Stats | None:
+    """Apply a dry run (or review its groups again) for real. None if declined."""
+    real_mode = real_delete_mode(base_config)
+    if real_mode == "permanent" and not review and not confirm(
+            f"{StyleUI.RED}Permanently delete {dry.to_remove} file(s)? This cannot be undone.{StyleUI.RESET}"):
+        return None
+    real_config = {**config, "delete_mode": real_mode}
+    stats, quit_requested, _ = run_scan(target, real_config, settings, index, store,
+                                        from_dry=dry, review_again=review)
+    index.clear()
+    if quit_requested:
+        exit_script(1 if stats.failed else 0)
+    return stats
+
+
 def continue_after_dry_run(target: Path, config: dict, base_config: dict, settings: dict,
                            index: FolderIndex, store, dry: DryRun) -> str | None:
     """Offer to carry out a finished dry run without rescanning.
@@ -640,28 +737,22 @@ def continue_after_dry_run(target: Path, config: dict, base_config: dict, settin
     while True:
         choice = after_dry_run_menu(dry, real_mode)
         if choice == "quit":
+            if store is not None:
+                info("The dry run stays saved - choose this folder again to carry it out.")
             exit_script(0)
         if choice in ("back", "change"):
             return choice
         if choice not in ("apply", "review"):
             warn("Unknown option.")
             continue
-        if real_mode == "permanent" and choice == "apply" and not confirm(
-                f"{StyleUI.RED}Permanently delete {dry.to_remove} file(s)? This cannot be undone.{StyleUI.RESET}"):
-            continue
-        real_config = {**config, "delete_mode": real_mode}
-        stats, quit_requested, _ = run_scan(target, real_config, settings, index, store,
-                                            from_dry=dry, review_again=(choice == "review"))
-        index.clear()
-        if quit_requested:
-            exit_script(1 if stats.failed else 0)
-        return None
+        if carry_out_dry_run(target, config, base_config, settings, index, store, dry,
+                             review=(choice == "review")) is not None:
+            return None
 
 
 def after_dry_run_menu(dry: DryRun, real_mode: str) -> str:
     """Offer to carry out the dry run. Returns 'apply', 'review', 'back', 'change' or 'quit'."""
-    fate = {"trash": "move {n} file(s) to the trash", "permanent": "permanently delete {n} file(s)"}
-    what = fate.get(real_mode, "remove {n} file(s)").format(n=dry.to_remove)
+    what = _fate(real_mode, dry.to_remove)
     if dry.to_rename:
         what += f", rename {dry.to_rename}"
     print(f"\n{StyleUI.BOLD}Dry run finished.{StyleUI.RESET} The groups found are kept, so continuing needs no rescan. "

@@ -42,28 +42,41 @@ class RunContext:
     """Services for one run: action log, saved session and the rename default."""
 
     def __init__(self, action_log=None, store=None, matching: dict | None = None,
-                 created: str | None = None, rename: bool = True):
+                 created: str | None = None, rename: bool = True, dry: bool = False,
+                 scanned: int = 0):
         self.log = action_log
         self.store = store
         self.matching = matching or {}
         self.created = created or datetime.now().isoformat(timespec="seconds")
         self.rename = rename
+        self.dry = dry            # a dry run: nothing was deleted, the session must say so
+        self.scanned = scanned
         self.groups: list[Group] | None = None
+        self.exact_groups: list[ExactGroup] = []   # kept for dry runs, to carry them out later
         self.index = 0
+        self.finished = False
 
     def record(self, kind: str, path: Path, kept: Path | None = None, detail: str = "") -> None:
         if self.log is not None:
             self.log.action(kind, path, kept, detail)
 
-    def save(self, groups=None, index: int | None = None) -> None:
+    def save(self, groups=None, index: int | None = None, finished: bool | None = None) -> None:
         if groups is not None:
             self.groups = groups
         if index is not None:
             self.index = index
-        if self.store is None or self.groups is None:
+        if finished is not None:
+            self.finished = finished
+        # Nothing is worth saving before the groups are known, except a finished dry run.
+        if self.store is None or (self.groups is None and not self.finished):
             return
-        self.store.save({"created": self.created, "matching": self.matching, "index": self.index,
-                         "groups": [g.to_dict() for g in self.groups]})
+        self.store.save({
+            "created": self.created, "matching": self.matching, "index": self.index,
+            "dry_run": self.dry, "finished": self.finished, "scanned": self.scanned,
+            "groups": [g.to_dict() for g in self.groups or []],
+            # A real run removed its exact copies right away; a dry run still has to.
+            "exact_groups": [e.to_dict() for e in self.exact_groups] if self.dry else [],
+        })
 
     @property
     def has_saved_session(self) -> bool:
@@ -181,6 +194,13 @@ class ExactGroup:
     @property
     def paths(self) -> list[Path]:
         return [f["path"] for f in self.files]
+
+    def to_dict(self) -> dict:
+        return {"files": [{**f, "path": str(f["path"])} for f in self.files]}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ExactGroup":
+        return cls([{**f, "path": Path(f["path"])} for f in data["files"]])
 
 
 EXACT_REASON = "exact copy (identical bytes), automatic"
@@ -660,6 +680,8 @@ def review_groups(groups: list[Group], config: dict, confirm_mode: str, stats: S
                 if choice is not None:
                     index, revisit = choice, True
                     continue
+            if ctx.dry:  # a dry run's session is always kept, to carry it out later
+                return True
             left = sum(g.status != "done" for g in groups)
             if left and ctx.store is not None:
                 return confirm(f"Keep the saved session to come back to the {left} skipped group(s) later?")
@@ -749,9 +771,11 @@ def validate_groups(groups: list[Group]) -> tuple[list[Group], int, int]:
 
 
 def resume_review(data: dict, config: dict, confirm_mode: str, stats: Stats, rel, ctx: RunContext) -> bool:
-    print_banner("Stage 2 · Visually identical images (resumed)")
+    print_banner("Stage 2 · Visually identical images (resumed)" + (" - dry run" if ctx.dry else ""))
+    ctx.exact_groups = [ExactGroup.from_dict(e) for e in data.get("exact_groups", [])]
     groups = [Group.from_dict(g) for g in data["groups"]]
     groups, dropped_groups, dropped_images = validate_groups(groups)
+    ctx.groups = groups
     if dropped_groups or dropped_images:
         warn(f"Files changed on disk since the session was saved: {dropped_groups} group(s) and "
              f"{dropped_images} image(s) were dropped. Run a new scan to pick them up again.")
@@ -877,3 +901,18 @@ def review_dry_run_again(exact_groups: list[ExactGroup], groups: list[Group], co
         return False
     print_banner("Stage 2 · Visually identical images")
     return review_groups(groups, config, confirm_mode, stats, rel, ctx)
+
+
+def planned_changes(exact_groups: list[ExactGroup], groups: list[Group], rename: bool) -> tuple[int, int]:
+    """(files a dry run would remove, files it would rename)."""
+    remove = sum(len(e.files) - 1 for e in exact_groups)
+    remove += sum(g.removed for g in groups if g.status == "done")
+    renames = sum(1 for e in exact_groups if rename and rename_target(e.paths[0], e.paths))
+    renames += sum(1 for g in groups if g.status == "done" and g.rename
+                   and rename_target(g.images[g.kept or 0]["path"], g.paths))
+    return remove, renames
+
+
+def dry_run_from_session(data: dict) -> tuple[list[ExactGroup], list[Group]]:
+    return ([ExactGroup.from_dict(e) for e in data.get("exact_groups", [])],
+            [Group.from_dict(g) for g in data.get("groups", [])])

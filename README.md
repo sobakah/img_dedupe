@@ -73,9 +73,73 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[jxl]"
 ```
 
-Without installing at all, `python3 -m scripts` works from the project folder once Pillow and send2trash are available. (The code lives in the `scripts/` folder; installed, it is the Python package `img_dedupe`.)
-
 AVIF is read natively by recent Pillow versions. Without the JXL extra, `.jxl` files are still covered by Stage 1, and Stage 2 reports them as unreadable instead of silently skipping them.
+
+### Without installing
+
+img_dedupe also runs straight from the project folder, without installing it: handy for trying it out, or on a computer where you can't or don't want to install anything. It is then started with `python -m scripts` instead of `img_dedupe` (the code lives in the `scripts/` folder); everything else works the same.
+
+**1. Get the code.** Either clone it:
+
+```bash
+git clone https://github.com/sobakah/img_dedupe.git ~/img_dedupe
+```
+
+or, on GitHub, click **Code → Download ZIP**, unpack it and rename the folder `img_dedupe-main` to `img_dedupe`. The examples below assume the project is in `~/img_dedupe`; adjust the path if you put it elsewhere.
+
+**2. Set up the packages once.** img_dedupe needs Pillow and send2trash. A virtual environment inside the project folder keeps them apart from the rest of your system, and works on distributions that block global `pip install`:
+
+```bash
+cd ~/img_dedupe
+python3 -m venv .venv
+.venv/bin/pip install Pillow send2trash
+.venv/bin/pip install pillow-jxl-plugin      # optional: JPEG XL support
+```
+
+The `.venv` folder is ignored by git. If a package is missing when you start img_dedupe, it tells you which one and how to set it up.
+
+**3. Start it from the project folder:**
+
+```bash
+cd ~/img_dedupe
+.venv/bin/python -m scripts /path/to/pictures
+```
+
+All options work as usual, e.g. `.venv/bin/python -m scripts /path/to/pictures -r --dry-run`. After `source .venv/bin/activate`, the shorter `python3 -m scripts /path/to/pictures` is enough until you close the terminal or run `deactivate`.
+
+**From any other folder,** Python has to be told where the project is:
+
+```bash
+PYTHONPATH=~/img_dedupe ~/img_dedupe/.venv/bin/python -m scripts /path/to/pictures
+```
+
+To type just `img_dedupe` as if it were installed, add this alias to `~/.bashrc` and open a new terminal:
+
+```bash
+alias img_dedupe='PYTHONPATH=~/img_dedupe ~/img_dedupe/.venv/bin/python -m scripts'
+```
+
+**Common mistakes:**
+
+| What you typed | What happens |
+|---|---|
+| `python3 scripts/` or `python3 scripts/cli.py` | *"attempted relative import with no known parent package"*: the folder must be started as a module, with `-m scripts` |
+| `python3 -m scripts` in another folder | *"No module named scripts"*: start it from the project folder, or set `PYTHONPATH` as above |
+| `python3 -m scripts` without the virtual environment | *"Missing required packages"*: use `.venv/bin/python`, or activate the environment first |
+
+**On Windows** (not tested yet), in the project folder:
+
+```bat
+py -m venv .venv
+.venv\Scripts\pip install Pillow send2trash pyreadline3
+.venv\Scripts\python -m scripts C:\Path\To\Pictures
+```
+
+`pyreadline3` is optional; it enables Tab completion and prefilled answers in the prompts.
+
+**Your files:** when running this way, `config.json`, the log `img_dedupe.log` and saved sessions (`sessions/`) are kept in the project folder (see *Where files are kept*).
+
+**Updating:** run `git pull` in the project folder; the packages in `.venv` stay as they are. If you used the ZIP, download it again, copy `config.json`, `img_dedupe.log` and `sessions/` from the old folder into the new one, and set up `.venv` again as in step 2 (a virtual environment can't be moved to another folder).
 
 ### Where files are kept
 
@@ -83,9 +147,9 @@ AVIF is read natively by recent Pillow versions. Without the JXL extra, `.jxl` f
 |---|---|---|
 | Config | `config.json` in the project folder, else `~/.config/img_dedupe/config.json` | `~/.config/img_dedupe/config.json` |
 | Log | `img_dedupe.log` in the project folder | `~/.local/state/img_dedupe/img_dedupe.log` |
-| Saved sessions | `~/.local/state/img_dedupe/sessions/` | the same |
+| Saved sessions | `sessions/` in the project folder | `~/.local/state/img_dedupe/sessions/` |
 
-`$XDG_CONFIG_HOME` and `$XDG_STATE_HOME` are respected; on Windows the state folder is `%LOCALAPPDATA%\img_dedupe`. A regular install lives inside Python's `site-packages`, which is why it keeps nothing there. `config.json` and `img_dedupe.log` are listed in `.gitignore`, so personal settings and the log never end up in the repository. Copy `config.example.json` to `config.json` to start customising.
+`$XDG_CONFIG_HOME` and `$XDG_STATE_HOME` are respected; on Windows the state folder is `%LOCALAPPDATA%\img_dedupe`. A regular install lives inside Python's `site-packages`, which is why it keeps nothing there. `config.json`, `img_dedupe.log` and `sessions/` are listed in `.gitignore`, so personal settings, the log and saved sessions never end up in the repository. Sessions saved by older versions in the state folder are still found and move to the project folder automatically. Copy `config.example.json` to `config.json` to start customising.
 
 ## Usage
 
@@ -132,7 +196,7 @@ By default only **borderline** groups (worst difference above 60% of the limit) 
 
 ### After a dry run: doing it for real without rescanning
 
-When a dry run finishes with something to change, the groups it found are kept in memory and you get two ways to continue. Both use the delete mode from your config (`trash` if the config itself says `dry_run`), not the dry run.
+When a dry run finishes with something to change, the groups it found are kept, in memory and as a saved session, and you get two ways to continue. Both use the delete mode from your config (`trash` if the config itself says `dry_run`), not the dry run.
 
 | Key | Continue for real |
 |---|---|
@@ -141,15 +205,18 @@ When a dry run finishes with something to change, the groups it found are kept i
 
 Before anything is deleted, each file is compared with its size and modification time from the dry run; files that changed in between are left alone and reported. With `permanent` as the configured mode, applying asks one `[y/N]` question first. The log marks these deletions "as shown in the dry run" or "chosen by user in the dry run". `--auto` runs never ask, so they end after the dry run.
 
+You don't have to decide right away: if you quit at this point (or the program is stopped), the finished dry run stays saved. The start screen then shows it as `[DRY RUN] [FINISHED]` with what it would change; **Enter** carries it out, `e` reviews its groups again for real. Once carried out, the saved dry run is removed. If carrying it out is interrupted, simply do it again: files already handled are recognised and skipped.
+
 ### Saved sessions: continuing later
 
-After the groups are found, the review is saved after every step, so an accidental Ctrl+C, a closed terminal or a crash loses nothing. Next time you choose the same folder, the start screen shows a `[RESUMABLE]` session with its progress; **Enter** resumes at the group where you stopped, `n` starts a new scan instead, `x` discards the session.
+After the groups are found, the review is saved after every step, so an accidental Ctrl+C, a closed terminal or a crash loses nothing. This includes dry runs. Next time you choose the same folder, the start screen shows a `[RESUMABLE]` session with its progress (marked `[DRY RUN]` for a dry run); **Enter** resumes at the group where you stopped, `n` starts a new scan instead, `x` discards the session.
 
 * **`q`** asks *"Save progress so you can continue this comparison later?"* (Enter = yes; `n` deletes the saved progress).
-* **Finishing** deletes the session, unless groups were skipped: then you are asked whether to keep it for them.
+* **Finishing** a real run deletes the session, unless groups were skipped: then you are asked whether to keep it for them. A finished **dry run** stays saved until you carry it out (see above).
+* **A session continues the way it was started.** A dry run resumes as a dry run, even if you now start without `--dry-run`; a real run never resumes as a dry run, because its earlier deletions already happened. The program says which mode it uses.
 * **On resume**, every open group is checked against the disk first. Images that were deleted or modified in the meantime are dropped (a group whose recommended file changed is dropped entirely), so a stale session never deletes anything it has not verified.
-* The groups of a session were matched with the settings of that scan (shown on the start screen); strictness and folder changes only apply to new scans. Delete mode, viewer, confirm and rename can be changed before resuming.
-* Dry runs and `--auto` runs are not saved. Sessions live in `~/.local/state/img_dedupe/sessions/` (`$XDG_STATE_HOME`; `%LOCALAPPDATA%` on Windows). Disable with `"save_sessions": false`.
+* The groups of a session were matched with the settings of that scan (shown on the start screen); strictness and folder changes only apply to new scans. Viewer, confirm and rename can be changed before resuming.
+* `--auto` runs are not saved. Where sessions are stored is described in *Where files are kept*. Disable saving with `"save_sessions": false`.
 
 ### Log
 

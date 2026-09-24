@@ -12,7 +12,8 @@ from pathlib import Path
 from .config import project_dir
 from .ui import warn
 
-SESSION_VERSION = 1
+SESSION_VERSION = 2          # 2: dry-run sessions and exact-copy groups
+_READABLE_VERSIONS = (1, 2)
 
 
 def state_dir() -> Path:
@@ -91,25 +92,56 @@ class ActionLog:
             self._write(f"{_stamp()} | END      | {text}")
 
 
+def sessions_dir() -> Path:
+    """Where saved sessions live: ``sessions/`` in the project folder when running
+    from a source checkout, otherwise the state directory."""
+    project = project_dir()
+    if project is not None and os.access(project, os.W_OK):
+        return project / "sessions"
+    return state_dir() / "sessions"
+
+
 class SessionStore:
-    """One saved review session per folder, written atomically after every change."""
+    """One saved review session per folder, written atomically after every change.
+
+    A session is either a real run (its deletions already happened) or a dry
+    run (``dry_run``); a finished dry run (``finished``) waits to be carried out.
+    """
 
     def __init__(self, target: Path):
         key = hashlib.sha1(str(target).encode("utf-8")).hexdigest()[:16]
-        self.path = state_dir() / "sessions" / f"{key}.json"
+        self.path = sessions_dir() / f"{key}.json"
+        # Before 1.1, checkouts also kept their sessions in the state directory.
+        self._legacy = state_dir() / "sessions" / f"{key}.json"
         self.target = target
         self.saved = False
         self._warned = False
 
-    def load(self) -> dict | None:
+    def _paths(self) -> list[Path]:
+        return [self.path] if self._legacy == self.path else [self.path, self._legacy]
+
+    def _read(self, path: Path) -> dict | None:
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
-        if not isinstance(data, dict) or data.get("version") != SESSION_VERSION \
-                or data.get("target") != str(self.target) or not data.get("groups"):
+        if not isinstance(data, dict) or data.get("version") not in _READABLE_VERSIONS \
+                or data.get("target") != str(self.target):
+            return None
+        data.setdefault("dry_run", False)
+        data.setdefault("finished", False)
+        data.setdefault("exact_groups", [])
+        data.setdefault("groups", [])
+        if not data["groups"] and not data["exact_groups"]:
             return None
         return data
+
+    def load(self) -> dict | None:
+        for path in self._paths():
+            data = self._read(path)
+            if data is not None:
+                return data
+        return None
 
     def save(self, data: dict) -> None:
         payload = {"version": SESSION_VERSION, "target": str(self.target), **data,
@@ -125,12 +157,19 @@ class SessionStore:
             if not self._warned:
                 self._warned = True
                 warn(f"Could not save progress to {self.path}: {exc}")
+            return
+        if self._legacy != self.path:  # moved to the new location: drop the old copy
+            try:
+                self._legacy.unlink()
+            except OSError:
+                pass
 
     def delete(self) -> None:
-        try:
-            self.path.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError as exc:
-            warn(f"Could not delete saved progress {self.path}: {exc}")
+        for path in self._paths():
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                warn(f"Could not delete saved progress {path}: {exc}")
         self.saved = False

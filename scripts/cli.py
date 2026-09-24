@@ -85,9 +85,11 @@ def main(argv: list[str] | None = None) -> int:
     missing = missing_packages()
     if missing:
         ui.error(f"Missing required packages: {', '.join(missing)}")
-        print("Install img_dedupe with its dependencies, e.g.:")
-        print("  pipx install .          (from the project folder)")
-        print("  pip install -e .        (inside a virtual environment, for development)")
+        print("To run img_dedupe without installing it, set up the packages once in the project folder:")
+        print("  python3 -m venv .venv")
+        print(f"  .venv/bin/pip install {' '.join(missing)}")
+        print("  .venv/bin/python -m scripts /path/to/pictures")
+        print("Or install img_dedupe with pipx, which takes care of this (see the README).")
         return 2
     if not ui.HAS_READLINE and not args.auto:
         ui.warn("readline is unavailable - Tab completion and prefilled prompts are disabled. "
