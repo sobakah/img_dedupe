@@ -13,7 +13,7 @@ PROJECT_URL = "https://github.com/<username>/img_dedupe"
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "delete_mode": "trash",       # 'trash', 'permanent', 'dry_run'
-    "viewer": "auto",             # 'auto', 'timg', 'kitty', 'identity'
+    "viewer": "auto",             # 'auto', 'identity', 'imagecompare', 'kitty', 'timg'
     "confirm": "uncertain",       # 'uncertain' (ask for borderline groups), 'always', 'never'
     "strictness": "normal",       # 'strict', 'normal', 'loose' (see STRICTNESS_PRESETS)
     "max_pixel_diff": None,       # number overrides the strictness preset
@@ -34,7 +34,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
 VALID_CHOICES = {
     "delete_mode": ("trash", "permanent", "dry_run"),
-    "viewer": ("auto", "timg", "kitty", "identity"),
+    "viewer": ("auto", "identity", "imagecompare", "kitty", "timg"),
     "confirm": ("uncertain", "always", "never"),
     "strictness": ("strict", "normal", "loose"),
     "color": ("auto", "always", "never"),

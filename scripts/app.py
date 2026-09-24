@@ -27,7 +27,8 @@ ROOT = "."
 STAGE_OPTIONS = {"both": "exact + visual", "1": "exact only", "2": "visual only"}
 CONFIRM_OPTIONS = {"uncertain": "borderline only", "always": "every group", "never": "never"}
 MODE_OPTIONS = {"trash": "trash", "dry_run": "dry run", "permanent": "permanent"}
-VIEWER_OPTIONS = {"auto": "auto", "identity": "identity", "kitty": "kitty", "timg": "timg"}
+VIEWER_OPTIONS = {"auto": "auto", "identity": "identity", "imagecompare": "imagecompare",
+                  "kitty": "kitty", "timg": "timg"}
 SUBFOLDER_OPTIONS = {False: "excluded", True: "included"}
 RENAME_OPTIONS = {True: "on", False: "off"}
 

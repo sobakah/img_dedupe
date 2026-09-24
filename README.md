@@ -255,7 +255,7 @@ Exit codes: `0` success, `1` some files could not be removed, `2` bad path/confi
 | Key | Default | Meaning |
 |---|---|---|
 | `delete_mode` | `trash` | `trash`, `permanent` or `dry_run` |
-| `viewer` | `auto` | `auto` (OS default), `identity` (Flatpak), `kitty`, `timg` |
+| `viewer` | `auto` | `auto` (OS default), `imagecompare`, `identity`, `kitty`, `timg`; see *Viewers* below |
 | `confirm` | `uncertain` | `uncertain`, `always`, `never` |
 | `strictness` | `normal` | preset for the pixel difference limit |
 | `max_pixel_diff` | `null` | a number here overrides the preset |
@@ -270,6 +270,22 @@ Exit codes: `0` success, `1` some files could not be removed, `2` bad path/confi
 | `format_ranks` | JXL > WEBP > AVIF > PNG/TIFF > JPEG > GIF > BMP | tie-breaker between equally lossless/lossy files |
 
 The old keys `threshold` and `hash_algo` are no longer used and are ignored.
+
+### Viewers
+
+`v` in a group opens all its images at once, with the viewer set by `viewer` in `config.json` or setting `5` on the start screen:
+
+| `viewer` | What you get |
+|---|---|
+| `auto` | Your desktop's default image viewer, one window per image |
+| `imagecompare` | [Image Compare](https://github.com/gimletlove/imagecompare): all images of the group side by side or in a grid, with synchronised zoom and pan; recommended for choosing the best copy |
+| `identity` | [Identity](https://apps.gnome.org/Identity/): the images as tabs or side by side, with synchronised zoom |
+| `kitty` | The images inside the terminal, if you use the kitty terminal |
+| `timg` | Low-resolution previews inside any terminal (needs `timg`) |
+
+Install Image Compare with `flatpak install flathub io.github.gimletlove.imagecompare`; a native RPM/DEB install from its releases page is used automatically when present. Identity: `flatpak install flathub org.gnome.gitlab.YaLTeR.Identity`. If the chosen app is not installed, img_dedupe says so, shows the install command, and falls back to the default viewer. Viewer windows are independent of img_dedupe, so quitting or pressing Ctrl+C does not close them.
+
+Neither comparison app can be told to open maximized. On KDE Plasma, a window rule does it (*System Settings → Window Management → Window Rules*, window class `io.github.gimletlove.imagecompare` or `org.gnome.gitlab.YaLTeR.Identity`, *Maximized horizontally/vertically: Apply initially*); on GNOME, press Super+↑ once the window is open.
 
 ## Tuning the comparison, in plain terms
 

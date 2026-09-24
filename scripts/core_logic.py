@@ -656,8 +656,8 @@ def _decision_screen(group: Group, position: str, config: dict, stats: Stats, re
             ctx.save()
             continue
         if choice == "v":
-            open_image_viewer(group.paths, config["viewer"])
-            dim(f"Opened {count} images with the '{config['viewer']}' viewer.")
+            used = open_image_viewer(group.paths, config["viewer"])
+            dim(f"Opened {count} images with {used}.")
             continue
 
         # Enter keeps the recommendation; "k" still works for old muscle memory.
