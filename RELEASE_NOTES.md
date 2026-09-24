@@ -1,5 +1,15 @@
 # Release notes
 
+## img_dedupe 1.1.1
+
+*Released 2026-09-24*
+
+### Fixed
+
+- In the folder list, several folders typed at once (like `4,1` or `2-5`) all switched together, following the first one. So a folder couldn't be unselected in the same input that selected another: `4,1` selected both. Now each listed folder is switched on its own: `4,1` selects 4 and unselects 1. A folder still takes the folders below it along, and a subfolder listed together with its parent keeps its own choice.
+
+**Upgrading:** `pipx upgrade img-dedupe`.
+
 ## img_dedupe 1.1
 
 *Released 2026-09-24*

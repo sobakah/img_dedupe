@@ -239,7 +239,7 @@ def choose_folders(base_dir: Path, index: FolderIndex, settings: dict) -> None:
                 ("m", "Switch the main folder on/off"),
             ]),
         ])
-        dim("  Several at once: 2-5 or 1,3,7 (all switch together, following the first one).")
+        dim("  Several at once: 2-5 or 1,3,7 - each listed folder is switched.")
 
         choice = safe_input(f"{StyleUI.BOLD}Folders: {StyleUI.RESET}").strip().lower()
         if choice == "":
@@ -262,13 +262,18 @@ def choose_folders(base_dir: Path, index: FolderIndex, settings: dict) -> None:
             if numbers is None:
                 warn("Unknown option.")
                 continue
-            turn_on = entries[numbers[0] - 1][0] in excluded
-            for number in numbers:
-                for rel in _below(entries[number - 1][0], entries):
-                    if turn_on:
-                        excluded.discard(rel)
+            # Every listed folder switches on its own, judged by its state before
+            # this input ("4,1" selects 4 and unselects 1). A folder takes the
+            # folders below it along; parents go first, so a listed subfolder's
+            # own switch wins over its parent's.
+            listed = {entries[n - 1][0] for n in numbers}
+            targets = {rel: rel in excluded for rel in listed}  # True = switch on
+            for rel in sorted(listed, key=lambda r: r.count("/")):
+                for below in _below(rel, entries):
+                    if targets[rel]:
+                        excluded.discard(below)
                     else:
-                        excluded.add(rel)
+                        excluded.add(below)
 
 
 # --- start screen ------------------------------------------------------------

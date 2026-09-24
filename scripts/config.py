@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-__version__ = "1.1"
+__version__ = "1.1.1"
 PROJECT_URL = "https://github.com/sobakah/img_dedupe"
 
 DEFAULT_CONFIG: dict[str, Any] = {
