@@ -10,6 +10,7 @@
     "hash_size": 8,
     "hash_max_distance": 28,
     "color": "auto",
+    "include_videos": true,
     "rename_numbered": true,
     "save_sessions": true,
     "log_file": null,

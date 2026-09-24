@@ -30,6 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
                       help="with -r, skip this subfolder (relative to the scanned folder; repeatable)")
     scan.add_argument("--stages", choices=("1", "2", "both"), default="both",
                       help="1 = exact copies only, 2 = visual matches only, both (default)")
+    scan.add_argument("--no-videos", action="store_true", help="leave video files out of the scan")
     scan.add_argument("--strictness", choices=("strict", "normal", "loose"), help="override the configured strictness")
 
     review = parser.add_argument_group("review")
@@ -101,6 +102,7 @@ def main(argv: list[str] | None = None) -> int:
         "stages": args.stages,
         "recursive": args.recursive,
         "no_ignore": args.no_ignore,
+        "videos": config["include_videos"] and not args.no_videos,
         "confirm": "always" if args.interactive else "never" if args.auto else config["confirm"],
     }
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
+import os
 import re
 from collections import defaultdict
 from dataclasses import dataclass
@@ -19,6 +20,10 @@ from .image_utils import (JXL_SUPPORTED, STRICTNESS_PRESETS, analyze_image,
 from .ui import (Column, StyleUI, badge, confirm, dim, error, info, print_banner,
                 print_menu, print_primary_action, print_table, progress,
                 safe_input, success, truncate, warn)
+from .video import describe as describe_video
+from .video import is_video, track_signature, video_stream_hash
+from .video import probe as probe_video
+from .video import tools_available as video_tools_available
 from .viewer import open_image_viewer
 
 log = logging.getLogger(__name__)
@@ -32,6 +37,7 @@ class UserQuit(Exception):
 class Stats:
     scanned: int = 0
     exact_deleted: int = 0
+    remux_deleted: int = 0        # videos with the same stream in another container
     similar_deleted: int = 0
     groups_skipped: int = 0
     groups_ignored: int = 0       # marked "not duplicates"
@@ -153,6 +159,8 @@ def execute_deletion(keep: Path, others: list[tuple[Path, int]], delete_mode: st
         stats.space_saved += size
         if kind == "exact":
             stats.exact_deleted += 1
+        elif kind == "remux":
+            stats.remux_deleted += 1
         else:
             stats.similar_deleted += 1
     return removed
@@ -191,38 +199,74 @@ def rename_kept(keep: Path, group_paths: list[Path], delete_mode: str, stats: St
 # --- Stage 1 -----------------------------------------------------------------
 @dataclass
 class ExactGroup:
-    """Byte-identical files; files[0] is kept. Each entry: path, size, mtime_ns."""
+    """Files with identical content; files[0] is kept. Each entry: path, size,
+    mtime_ns, and for remuxes a 'streams' description.
+
+    kind "exact": byte-identical files. kind "remux": videos whose video stream
+    is identical, in different containers (tracks may differ).
+    """
     files: list[dict]
+    kind: str = "exact"
 
     @property
     def paths(self) -> list[Path]:
         return [f["path"] for f in self.files]
 
     def to_dict(self) -> dict:
-        return {"files": [{**f, "path": str(f["path"])} for f in self.files]}
+        return {"kind": self.kind, "files": [{**f, "path": str(f["path"])} for f in self.files]}
 
     @classmethod
     def from_dict(cls, data: dict) -> "ExactGroup":
-        return cls([{**f, "path": Path(f["path"])} for f in data["files"]])
+        return cls([{**f, "path": Path(f["path"])} for f in data["files"]], data.get("kind", "exact"))
 
 
 EXACT_REASON = "exact copy (identical bytes), automatic"
+REMUX_REASON = "remux (same video stream, other container)"
+
+
+def _reason(group: ExactGroup, how: str) -> str:
+    if group.kind == "remux":
+        return f"{REMUX_REASON}, {how}"
+    return f"exact copy (identical bytes), {how}"
+
+
+def _exact_heading(group: ExactGroup, number: int, total: int, extra: str = "") -> None:
+    if group.kind == "remux":
+        label = badge("REMUX", StyleUI.CYAN)
+        detail = f"{len(group.files)} files · same video stream in different containers"
+    else:
+        label = badge("IDENTICAL", StyleUI.MAGENTA)
+        detail = f"{len(group.files)} files · {format_size(group.files[0]['size'])} each"
+    print(f"\n{StyleUI.BOLD}[{number}/{total}]{StyleUI.RESET} {label} {extra}{detail}")
+
+
+def _exact_table(group: ExactGroup, rel, keep_index: int = 0) -> None:
+    remux = group.kind == "remux"
+    rows = []
+    for i, f in enumerate(group.files):
+        kept = i == keep_index
+        row = [("▶", StyleUI.GREEN + StyleUI.BOLD) if kept else " ",
+               (f"[{i}]", "key"),
+               ("KEEP", StyleUI.GREEN) if kept else ("DEL", StyleUI.RED),
+               (rel(f["path"]), StyleUI.BOLD) if kept else rel(f["path"])]
+        if remux:
+            row += [format_size(f["size"]), (f.get("streams", ""), StyleUI.GRAY)]
+        rows.append(row)
+    columns = [Column(""), Column("#"), Column("Action"), Column("File", flex=True)]
+    if remux:
+        columns += [Column("Size", align="right"), Column("Streams", optional=True)]
+    print_table(columns, rows)
 
 
 def _apply_exact(group: ExactGroup, number: int, total: int, config: dict, stats: Stats,
-                 rel, ctx: RunContext, reason: str = EXACT_REASON) -> Path:
-    """Show one exact group and remove its copies. Returns the kept file's path."""
-    keep, size = group.paths[0], group.files[0]["size"]
-    print(f"\n{StyleUI.BOLD}[{number}/{total}]{StyleUI.RESET} {badge('IDENTICAL', StyleUI.MAGENTA)} "
-          f"{len(group.files)} files · {format_size(size)} each")
-    rows = [[("▶", StyleUI.GREEN + StyleUI.BOLD) if i == 0 else " ",
-             (f"[{i}]", "key"),
-             ("KEEP", StyleUI.GREEN) if i == 0 else ("DEL", StyleUI.RED),
-             (rel(p), StyleUI.BOLD) if i == 0 else rel(p)]
-            for i, p in enumerate(group.paths)]
-    print_table([Column(""), Column("#"), Column("Action"), Column("File", flex=True)], rows)
-    execute_deletion(keep, [(p, size) for p in group.paths[1:]], config["delete_mode"], stats, "exact",
-                     rel, ctx, reason)
+                 rel, ctx: RunContext, reason: str | None = None, show: bool = True) -> Path:
+    """Show one exact/remux group and remove its copies. Returns the kept file's path."""
+    keep = group.paths[0]
+    if show:
+        _exact_heading(group, number, total)
+        _exact_table(group, rel)
+    execute_deletion(keep, [(f["path"], f["size"]) for f in group.files[1:]], config["delete_mode"], stats,
+                     group.kind, rel, ctx, reason or _reason(group, "automatic"))
     if ctx.rename:
         keep = rename_kept(keep, group.paths, config["delete_mode"], stats, rel, ctx)
     return keep
@@ -268,6 +312,122 @@ def find_exact_duplicates(files: list[Path], config: dict, stats: Stats, rel,
     for number, group in enumerate(groups, 1):
         remaining.append(_apply_exact(group, number, len(groups), config, stats, rel, ctx))
 
+    return sorted(remaining), groups
+
+
+def _remux_decision(group: ExactGroup, number: int, total: int, config: dict, rel) -> int | None:
+    """Ask which file of a remux group to keep. Returns its index, or None to skip."""
+    count = len(group.files)
+    others = "1" if count == 2 else f"1-{count - 1}"
+    while True:
+        _exact_heading(group, number, total, extra=badge("TRACKS DIFFER", StyleUI.YELLOW) + " ")
+        dim("The video is identical; the files differ in their audio or subtitle tracks.")
+        _exact_table(group, rel)
+        fate = {"trash": "move the other {n} to the trash", "permanent": "permanently delete the other {n}",
+                "dry_run": "delete the other {n} (dry run)"}.get(config["delete_mode"], "remove the other {n}")
+        print_primary_action("Enter", f"Keep ▶ #0 {truncate(rel(group.paths[0]), 40, keep_end=True)}, "
+                                      + fate.format(n=count - 1))
+        print_menu([("Resolve", [(others, "Keep that file instead"), ("s", "Skip, keep all files")]),
+                    ("Navigate", [("q", "Quit")])])
+        choice = safe_input(f"{StyleUI.BOLD}Remux {number}/{total} action: {StyleUI.RESET}").strip().lower()
+        if choice == "q":
+            raise UserQuit
+        if choice == "s":
+            dim("Skipped - all files kept.")
+            return None
+        keep_index = 0 if choice == "" else int(choice) if choice.isdigit() else None
+        if keep_index is None or not 0 <= keep_index < count:
+            warn("Unknown option.")
+            continue
+        if keep_index != 0:
+            print()
+            _exact_table(group, rel, keep_index=keep_index)
+        if config["delete_mode"] == "permanent" and not confirm(
+                f"{StyleUI.RED}Permanently delete {count - 1} file(s)? This cannot be undone.{StyleUI.RESET}"):
+            info("Nothing deleted.")
+            continue
+        return keep_index
+
+
+def find_remuxes(files: list[Path], config: dict, confirm_mode: str, stats: Stats, rel,
+                 ctx: RunContext) -> tuple[list[Path], list[ExactGroup]]:
+    """Find videos whose video stream is identical in different containers.
+
+    ffprobe reads only the headers; the stream hash (which reads the whole file,
+    without decoding) is computed only for videos that another video could
+    match: same codec and resolution, nearly the same duration.
+    Returns (files left, the remux groups carried out)."""
+    videos = [f for f in files if is_video(f)]
+    if len(videos) < 2:
+        return files, []
+    print_banner("Stage 1 · Remuxed videos")
+    if not video_tools_available():
+        warn("ffmpeg/ffprobe not found - remuxed videos can't be detected (identical copies still are).")
+        return files, []
+
+    workers = min(8, os.cpu_count() or 4)
+    with concurrent.futures.ThreadPoolExecutor(workers) as pool:
+        metas = []
+        with progress("Reading video details", len(videos)) as bar:
+            for meta in pool.map(probe_video, videos):
+                metas.append(meta)
+                bar.advance()
+    unreadable = [v for v, m in zip(videos, metas) if m is None]
+    if unreadable:
+        warn(f"{len(unreadable)} video(s) could not be read and were left out of the remux check.")
+    metas = [m for m in metas if m is not None]
+
+    # Candidates: same codec and resolution, durations within 1 s (or 1 %).
+    buckets = defaultdict(list)
+    for meta in metas:
+        buckets[(meta["codec"], meta["width"], meta["height"])].append(meta)
+    candidates = []
+    for bucket in buckets.values():
+        bucket.sort(key=lambda m: m["duration"])
+        for i, meta in enumerate(bucket):
+            tolerance = max(1.0, meta["duration"] * 0.01)
+            neighbours = bucket[max(0, i - 1):i] + bucket[i + 1:i + 2]
+            if any(abs(meta["duration"] - n["duration"]) <= tolerance for n in neighbours):
+                candidates.append(meta)
+
+    by_hash = defaultdict(list)
+    if candidates:
+        with concurrent.futures.ThreadPoolExecutor(min(4, workers)) as pool:
+            with progress("Hashing video streams", len(candidates)) as bar:
+                for meta, digest in zip(candidates, pool.map(
+                        lambda m: video_stream_hash(m["path"], m["codec"]), candidates)):
+                    if digest is None:
+                        warn(f"Could not read the video stream of {rel(meta['path'])}; left out.")
+                    else:
+                        by_hash[(meta["codec"], digest)].append(meta)
+                    bar.advance()
+
+    found = [sorted(g, key=lambda m: (-len(m["audio"]), -len(m["subtitles"]), has_copy_number(m["path"]),
+                                      m["mtime_ns"], str(m["path"])))
+             for g in by_hash.values() if len(g) > 1]
+    found.sort(key=lambda g: str(g[0]["path"]).lower())
+    if not found:
+        dim("No remuxed videos found.")
+        return files, []
+
+    in_groups = {m["path"] for g in found for m in g}
+    remaining = [f for f in files if f not in in_groups]
+    groups: list[ExactGroup] = []
+    for number, members in enumerate(found, 1):
+        group = ExactGroup([{"path": m["path"], "size": m["size"], "mtime_ns": m["mtime_ns"],
+                             "streams": describe_video(m)} for m in members], kind="remux")
+        same_tracks = len({track_signature(m) for m in members}) == 1
+        ask = confirm_mode == "always" or (confirm_mode == "uncertain" and not same_tracks)
+        keep_index = _remux_decision(group, number, len(found), config, rel) if ask else 0
+        if keep_index is None:
+            remaining.extend(group.paths)
+            continue
+        if keep_index:
+            group.files.insert(0, group.files.pop(keep_index))
+        how = "automatic" if not ask else ("confirmed by user" if keep_index == 0 else "chosen by user")
+        remaining.append(_apply_exact(group, number, len(found), config, stats, rel, ctx,
+                                      reason=_reason(group, how), show=not ask))
+        groups.append(group)
     return sorted(remaining), groups
 
 
@@ -892,7 +1052,7 @@ def _check_exact(groups: list[ExactGroup]) -> tuple[list[ExactGroup], int]:
                                     if _file_unchanged(f["path"], f["size"], f["mtime_ns"])]
         dropped += len(group.files) - len(files)
         if len(files) > 1:
-            checked.append(ExactGroup(files))
+            checked.append(ExactGroup(files, group.kind))
     return checked, dropped
 
 
@@ -930,12 +1090,12 @@ def _follow_renames(groups: list[Group], renamed: dict[Path, Path]) -> None:
 
 
 def _apply_all_exact(exact_groups: list[ExactGroup], config: dict, stats: Stats, rel,
-                     ctx: RunContext, reason: str) -> dict[Path, Path]:
+                     ctx: RunContext, how: str) -> dict[Path, Path]:
     renamed = {}
     if exact_groups:
-        print_banner("Stage 1 · Exact duplicates")
+        print_banner("Stage 1 · Exact duplicates and remuxed videos")
     for number, group in enumerate(exact_groups, 1):
-        new_path = _apply_exact(group, number, len(exact_groups), config, stats, rel, ctx, reason)
+        new_path = _apply_exact(group, number, len(exact_groups), config, stats, rel, ctx, _reason(group, how))
         if new_path != group.paths[0]:
             renamed[group.paths[0]] = new_path
     return renamed
@@ -945,8 +1105,7 @@ def apply_dry_run(exact_groups: list[ExactGroup], groups: list[Group], config: d
                   stats: Stats, rel, ctx: RunContext) -> None:
     """Carry out exactly what the dry run showed, without asking again."""
     exact_groups, dropped_files = _check_exact(exact_groups)
-    renamed = _apply_all_exact(exact_groups, config, stats, rel, ctx,
-                               "exact copy (identical bytes), as shown in the dry run")
+    renamed = _apply_all_exact(exact_groups, config, stats, rel, ctx, "as shown in the dry run")
     _follow_renames(groups, renamed)
 
     decided = [g for g in groups if g.status == "done"]
@@ -972,7 +1131,7 @@ def review_dry_run_again(exact_groups: list[ExactGroup], groups: list[Group], co
                          confirm_mode: str, stats: Stats, rel, ctx: RunContext) -> bool:
     """Apply the exact copies, then walk through the visual groups afresh."""
     exact_groups, dropped_files = _check_exact(exact_groups)
-    renamed = _apply_all_exact(exact_groups, config, stats, rel, ctx, EXACT_REASON)
+    renamed = _apply_all_exact(exact_groups, config, stats, rel, ctx, "automatic")
     _follow_renames(groups, renamed)
     for group in groups:  # forget the dry run's decisions, but not "not duplicates" marks
         if group.status != "ignored":
