@@ -148,6 +148,7 @@ py -m venv .venv
 | Config | `config.json` in the project folder, else `~/.config/img_dedupe/config.json` | `~/.config/img_dedupe/config.json` |
 | Log | `img_dedupe.log` in the project folder | `~/.local/state/img_dedupe/img_dedupe.log` |
 | Saved sessions | `sessions/` in the project folder | `~/.local/state/img_dedupe/sessions/` |
+| "Not duplicates" marks | `.img_dedupe_ignore.json`, hidden in the scanned picture folder | the same |
 
 `$XDG_CONFIG_HOME` and `$XDG_STATE_HOME` are respected; on Windows the state folder is `%LOCALAPPDATA%\img_dedupe`. A regular install lives inside Python's `site-packages`, which is why it keeps nothing there. `config.json`, `img_dedupe.log` and `sessions/` are listed in `.gitignore`, so personal settings, the log and saved sessions never end up in the repository. Sessions saved by older versions in the state folder are still found and move to the project folder automatically. Copy `config.example.json` to `config.json` to start customising.
 
@@ -171,7 +172,9 @@ Stage 2 collects every duplicate group first, then walks through them. Each grou
 |---|---|
 | **Enter** | Keep the ▶ recommendation (#0) and remove the rest; the Enter line names the file and says what happens to the others |
 | `1`–`n` | Keep that image instead; ▶ moves to it before anything is deleted |
-| `s` | Skip the group (keep all files) and go to the next one |
+| `s` | Skip the group (keep all files) and go to the next one; it will be shown again next time |
+| `i` | **Not duplicates**: keep all files and remember it, so the group is not shown again (see below) |
+| `i1`–`in` | Only that image is not a duplicate: it is removed from the group and remembered; decide on the rest as usual |
 | `n` | Switch the "(1)" rename on/off for this group (shown only when it applies) |
 | `v` | Open all images of the group in the viewer; the group list is shown again afterwards |
 | `p` | Back to the previous group that is still open (e.g. one you skipped) |
@@ -190,9 +193,20 @@ By default only **borderline** groups (worst difference above 60% of the limit) 
 | `--dry-run` | Show what would be deleted; delete nothing |
 | `--exclude DIR` | With `-r`, skip this subfolder (repeatable) |
 | `--no-rename` | Keep "(1)" in the names of kept copies |
+| `--no-ignore` | Show pairs marked "not duplicates" again, for this run |
 | `-c FILE`, `--config FILE` | Use this config file |
 | `--color {auto,always,never}` | Colour handling; `auto` respects `NO_COLOR` and non-terminal output |
 | `-v`, `-vv` | More logging on stderr (`-vv` logs every pixel comparison) |
+
+### Marking false matches as "not duplicates"
+
+Sometimes two images are matched that you want to keep both of, for example a photo and a nearly identical edited version. Skipping (`s`) keeps them, but asks again next time. Press **`i`** instead to mark the group as *not duplicates*; `i2` marks only image #2, when the rest of the group are real duplicates.
+
+The marks are saved in a hidden file, `.img_dedupe_ignore.json`, in the folder you scan, so they stay with your pictures no matter where you start img_dedupe from. On later scans of that folder, marked pairs are left out, and the program says how many. They count for resumed sessions and saved dry runs as well, and marks made during a dry run are kept too, since marking changes no files.
+
+* A mark applies to exactly those two files: if one of them is edited (its size or modification time changes), the pair is shown again. A new, better copy of a picture also makes its group appear again, because it is a new pair.
+* Marks belong to the scanned folder. Scanning a subfolder on its own, or the folder above it, uses its own marks.
+* To see marked pairs again for one run, use `--no-ignore`; to forget all marks, delete `.img_dedupe_ignore.json`. The file is plain JSON, so single entries can also be removed by hand.
 
 ### After a dry run: doing it for real without rescanning
 

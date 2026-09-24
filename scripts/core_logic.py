@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
@@ -33,6 +34,7 @@ class Stats:
     exact_deleted: int = 0
     similar_deleted: int = 0
     groups_skipped: int = 0
+    groups_ignored: int = 0       # marked "not duplicates"
     renamed: int = 0
     failed: int = 0
     space_saved: int = 0
@@ -55,6 +57,7 @@ class RunContext:
         self.exact_groups: list[ExactGroup] = []   # kept for dry runs, to carry them out later
         self.index = 0
         self.finished = False
+        self.ignores = None       # IgnoreList of pairs marked "not duplicates"
 
     def record(self, kind: str, path: Path, kept: Path | None = None, detail: str = "") -> None:
         if self.log is not None:
@@ -279,7 +282,7 @@ class Group:
     diffs: list[int | None]       # difference of each image to images[0]
     limit: int
     borderline_above: float
-    status: str = "pending"       # pending | skipped | done
+    status: str = "pending"       # pending | skipped | done | ignored ("not duplicates")
     kept: int | None = None
     removed: int = 0
     rename: bool = True           # strip "(1)" from the kept file's name
@@ -297,6 +300,11 @@ class Group:
     def paths(self) -> list[Path]:
         return [m["path"] for m in self.images]
 
+    @property
+    def is_open(self) -> bool:
+        """Still waiting for a decision (not resolved, not marked "not duplicates")."""
+        return self.status in ("pending", "skipped")
+
     def verdict(self) -> str:
         if self.borderline:
             return badge("BORDERLINE", StyleUI.YELLOW)
@@ -307,6 +315,8 @@ class Group:
             return badge("DONE   ", StyleUI.GREEN)
         if self.status == "skipped":
             return badge("SKIPPED", StyleUI.YELLOW)
+        if self.status == "ignored":
+            return badge("NOT DUP", StyleUI.MAGENTA)
         return badge("OPEN   ", StyleUI.GRAY)
 
     def to_dict(self) -> dict:
@@ -389,6 +399,33 @@ def _parallel(executor, fn, items: list, label: str, *extra) -> list:
             results.append(result)
             bar.advance()
     return results
+
+
+def drop_ignored(groups: list[Group], ignores) -> tuple[list[Group], int]:
+    """Leave out images marked "not duplicates" of their group's recommended image.
+    Returns (remaining groups, images left out)."""
+    if ignores is None or not ignores.enabled or not len(ignores):
+        return groups, 0
+    kept, hidden = [], 0
+    for group in groups:
+        if not group.is_open:
+            kept.append(group)
+            continue
+        pairs = [(m, d) for m, d in zip(group.images[1:], group.diffs[1:])
+                 if not ignores.contains(group.images[0], m)]
+        hidden += len(group.images) - 1 - len(pairs)
+        if pairs:
+            group.images = [group.images[0]] + [m for m, _ in pairs]
+            group.diffs = [None] + [d for _, d in pairs]
+            kept.append(group)
+    return kept, hidden
+
+
+def report_ignored(hidden: int, groups: list[Group]) -> None:
+    if hidden:
+        remaining = sum(g.is_open for g in groups)
+        dim(f"{hidden} image(s) you marked as not duplicates were left out, {remaining} group(s) remain "
+            f"(--no-ignore shows them again).")
 
 
 def find_groups(files: list[Path], config: dict, rel) -> list[Group]:
@@ -559,7 +596,10 @@ def _decision_screen(group: Group, position: str, config: dict, stats: Stats, re
         _group_table(group, rel)
 
         print_primary_action("Enter", _keep_description(group, config["delete_mode"], rel))
-        resolve = [(others, "Keep that image instead"), ("s", "Skip, keep all files")]
+        resolve = [(others, "Keep that image instead"), ("s", "Skip, keep all files"),
+                   ("i", "Not duplicates - don't show again")]
+        if count > 2:
+            resolve.append((f"i1-i{count - 1}", "Only that image is not a duplicate"))
         if renamable:
             resolve.append(("n", f"Remove \"(1)\" from kept name: {'on' if group.rename else 'off'}"))
         print_menu([
@@ -582,6 +622,35 @@ def _decision_screen(group: Group, position: str, config: dict, stats: Stats, re
             return "prev"
         if choice == "t":
             return "overview"
+        if choice == "i":
+            for meta in group.images[1:]:
+                ctx.ignores.add(group.images[0], meta)
+            if group.status == "skipped":
+                stats.groups_skipped -= 1
+            group.status = "ignored"
+            stats.groups_ignored += 1
+            dim("Marked as not duplicates - this group won't be shown again.")
+            return "next"
+        single = re.fullmatch(r"i(\d+)", choice)
+        if single:
+            number = int(single[1])
+            if not 1 <= number < count:
+                warn(f"Choose an image from 1 to {count - 1}.")
+                continue
+            ctx.ignores.add(group.images[0], group.images[number])
+            dim(f"Marked #{number} {rel(group.images[number]['path'])} as not a duplicate.")
+            del group.images[number], group.diffs[number]
+            if len(group.images) == 1:
+                if group.status == "skipped":
+                    stats.groups_skipped -= 1
+                group.status = "ignored"
+                stats.groups_ignored += 1
+                return "next"
+            count = len(group.images)
+            others = "1" if count == 2 else f"1-{count - 1}"
+            renamable = any(rename_target(p, group.paths) for p in group.paths)
+            ctx.save()
+            continue
         if choice == "n" and renamable:
             group.rename = not group.rename
             ctx.save()
@@ -614,8 +683,13 @@ def _handled_screen(group: Group, position: str, rel) -> str:
     print_banner(f"[{position}] Duplicate group · {len(group.images)} images")
     print(_group_heading(group))
     print()
-    _group_table(group, rel, keep_index=group.kept or 0, done=True)
-    info(f"\nAlready handled: kept #{group.kept}, {group.removed} file(s) removed.")
+    if group.status == "ignored":
+        _group_table(group, rel)
+        info("\nMarked as not duplicates - all files were kept. Delete .img_dedupe_ignore.json "
+             "in the scanned folder to be asked about such pairs again.")
+    else:
+        _group_table(group, rel, keep_index=group.kept or 0, done=True)
+        info(f"\nAlready handled: kept #{group.kept}, {group.removed} file(s) removed.")
     print_primary_action("Enter", "Continue")
     print_menu([("Navigate", [("p", "Previous open group"), ("t", "Groups overview"), ("q", "Quit")])])
     choice = safe_input(f"{StyleUI.BOLD}Group {position} action: {StyleUI.RESET}").strip().lower()
@@ -638,9 +712,13 @@ def _overview(groups: list[Group], current: int | None, rel) -> int | None:
 
         done = sum(g.status == "done" for g in groups)
         skipped = sum(g.status == "skipped" for g in groups)
-        pending = len(groups) - done - skipped
-        print(f"\n{StyleUI.BOLD}Progress:{StyleUI.RESET} {StyleUI.GREEN}{done} done{StyleUI.RESET}   "
-              f"{StyleUI.YELLOW}{skipped} skipped{StyleUI.RESET}   {StyleUI.GRAY}{pending} open{StyleUI.RESET}")
+        ignored = sum(g.status == "ignored" for g in groups)
+        pending = len(groups) - done - skipped - ignored
+        progress_line = (f"\n{StyleUI.BOLD}Progress:{StyleUI.RESET} {StyleUI.GREEN}{done} done{StyleUI.RESET}   "
+                         f"{StyleUI.YELLOW}{skipped} skipped{StyleUI.RESET}   ")
+        if ignored:
+            progress_line += f"{StyleUI.MAGENTA}{ignored} not duplicates{StyleUI.RESET}   "
+        print(progress_line + f"{StyleUI.GRAY}{pending} open{StyleUI.RESET}")
         if current is not None:
             print_primary_action("Enter", f"Continue with group {current + 1}")
         else:
@@ -682,7 +760,7 @@ def review_groups(groups: list[Group], config: dict, confirm_mode: str, stats: S
                     continue
             if ctx.dry:  # a dry run's session is always kept, to carry it out later
                 return True
-            left = sum(g.status != "done" for g in groups)
+            left = sum(g.is_open for g in groups)
             if left and ctx.store is not None:
                 return confirm(f"Keep the saved session to come back to the {left} skipped group(s) later?")
             return False
@@ -691,7 +769,7 @@ def review_groups(groups: list[Group], config: dict, confirm_mode: str, stats: S
         position = f"{index + 1}/{total}"
         needs_prompt = confirm_mode == "always" or (confirm_mode == "uncertain" and group.borderline)
 
-        if group.status == "done":
+        if not group.is_open:
             if not revisit:
                 index += 1
                 continue
@@ -710,7 +788,7 @@ def review_groups(groups: list[Group], config: dict, confirm_mode: str, stats: S
         if navigation == "next":
             index += 1
         elif navigation == "prev":
-            earlier = [i for i in range(index) if groups[i].status != "done"]
+            earlier = [i for i in range(index) if groups[i].is_open]
             if earlier:
                 index, revisit = earlier[-1], True
             else:
@@ -729,7 +807,8 @@ def find_similar_images(files: list[Path], config: dict, confirm_mode: str, stat
     print(f"{StyleUI.BOLD}Limit:{StyleUI.RESET} {limit} ({preset})   "
           f"{StyleUI.BOLD}Confirm:{StyleUI.RESET} {confirm_mode}   {mode_badge(config['delete_mode'])}")
 
-    groups = find_groups(files, config, rel)
+    groups, hidden = drop_ignored(find_groups(files, config, rel), ctx.ignores)
+    report_ignored(hidden, groups)
     if not groups:
         dim("No visually identical images found.")
         return False, groups
@@ -753,7 +832,7 @@ def validate_groups(groups: list[Group]) -> tuple[list[Group], int, int]:
     is dropped entirely. Returns (groups, dropped groups, dropped images)."""
     kept_groups, dropped_groups, dropped_images = [], 0, 0
     for group in groups:
-        if group.status == "done":
+        if not group.is_open:
             kept_groups.append(group)
             continue
         if not _stamp_matches(group.images[0]):
@@ -779,7 +858,10 @@ def resume_review(data: dict, config: dict, confirm_mode: str, stats: Stats, rel
     if dropped_groups or dropped_images:
         warn(f"Files changed on disk since the session was saved: {dropped_groups} group(s) and "
              f"{dropped_images} image(s) were dropped. Run a new scan to pick them up again.")
-    open_groups = [i for i, g in enumerate(groups) if g.status != "done"]
+    groups, hidden = drop_ignored(groups, ctx.ignores)
+    ctx.groups = groups
+    report_ignored(hidden, groups)
+    open_groups = [i for i, g in enumerate(groups) if g.is_open]
     if not open_groups:
         info("Nothing left to review in the saved session.")
         return False
@@ -882,8 +964,8 @@ def apply_dry_run(exact_groups: list[ExactGroup], groups: list[Group], config: d
         automatic = group.decision == "automatic"
         _resolve(group, 0, config, stats, rel, ctx, automatic=automatic, reason=reason)
     if skipped:
-        stats.groups_skipped += len(skipped)
-        dim(f"\n{len(skipped)} group(s) skipped in the dry run were left as they are.")
+        stats.groups_skipped += sum(g.status != "ignored" for g in skipped)
+        dim(f"\n{len(skipped)} group(s) skipped or marked as not duplicates in the dry run were left as they are.")
 
 
 def review_dry_run_again(exact_groups: list[ExactGroup], groups: list[Group], config: dict,
@@ -892,9 +974,12 @@ def review_dry_run_again(exact_groups: list[ExactGroup], groups: list[Group], co
     exact_groups, dropped_files = _check_exact(exact_groups)
     renamed = _apply_all_exact(exact_groups, config, stats, rel, ctx, EXACT_REASON)
     _follow_renames(groups, renamed)
-    for group in groups:  # forget the dry run's decisions
-        group.status, group.kept, group.removed, group.decision = "pending", None, 0, None
+    for group in groups:  # forget the dry run's decisions, but not "not duplicates" marks
+        if group.status != "ignored":
+            group.status, group.kept, group.removed, group.decision = "pending", None, 0, None
     groups, dropped_groups, dropped_images = validate_groups(groups)
+    groups, hidden = drop_ignored(groups, ctx.ignores)
+    report_ignored(hidden, groups)
     if dropped_files or dropped_groups or dropped_images:
         warn("Some files changed on disk since the dry run and were left alone.")
     if not groups:

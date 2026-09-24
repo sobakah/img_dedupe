@@ -14,7 +14,7 @@ from .core_logic import (ExactGroup, Group, RunContext, Stats, UserQuit,
                         dry_run_from_session, format_size, mode_badge, planned_changes,
                         resolve_limit, resume_review, review_dry_run_again)
 from .image_utils import IMAGE_EXTENSIONS, STRICTNESS_PRESETS
-from .session import ActionLog, SessionStore, resolve_log_path
+from .session import ActionLog, IgnoreList, SessionStore, resolve_log_path
 from .ui import (StyleUI, badge, confirm, dim, disable_path_completion, display_width,
                 enable_path_completion, error, exit_script, info, pad,
                 print_banner, print_menu, print_primary_action, safe_input,
@@ -293,7 +293,7 @@ def matching_settings(config: dict, settings: dict, target: Path, index: FolderI
 
 def session_state(saved: dict) -> tuple[bool, bool, int]:
     """(is a dry run, dry run finished, open groups) of a saved session."""
-    open_ = sum(g["status"] != "done" for g in saved["groups"])
+    open_ = sum(g["status"] in ("pending", "skipped") for g in saved["groups"])
     dry = bool(saved.get("dry_run"))
     return dry, dry and (bool(saved.get("finished")) or open_ == 0), open_
 
@@ -309,6 +309,7 @@ def _session_panel(saved: dict, rename: bool) -> None:
     groups = saved["groups"]
     done = sum(g["status"] == "done" for g in groups)
     skipped = sum(g["status"] == "skipped" for g in groups)
+    ignored = sum(g["status"] == "ignored" for g in groups)
     dry, finished, open_ = session_state(saved)
     try:
         when = datetime.fromisoformat(saved.get("updated", "")).strftime("%d %b %Y %H:%M")
@@ -322,7 +323,8 @@ def _session_panel(saved: dict, rename: bool) -> None:
     else:
         text = (f"{kind}{badge('RESUMABLE', StyleUI.CYAN)} from {when} · {len(groups)} groups: "
                 f"{StyleUI.GREEN}{done} done{StyleUI.RESET} · {StyleUI.YELLOW}{skipped} skipped{StyleUI.RESET} · "
-                f"{open_ - skipped} open")
+                + (f"{StyleUI.MAGENTA}{ignored} not duplicates{StyleUI.RESET} · " if ignored else "")
+                + f"{open_ - skipped} open")
     print(f"\n{StyleUI.BOLD}Saved session:{StyleUI.RESET} {text}")
     description = saved.get("matching", {}).get("description")
     if description:
@@ -467,6 +469,8 @@ def print_summary(stats: Stats, delete_mode: str, action_log: ActionLog | None =
           f"{StyleUI.GREEN}Identical images {verb}: {stats.similar_deleted}{StyleUI.RESET}")
     print(f"  {StyleUI.GREEN}{'To rename' if dry else 'Renamed'}: {stats.renamed}{StyleUI.RESET}   "
           f"{StyleUI.YELLOW}Groups skipped: {stats.groups_skipped}{StyleUI.RESET}   "
+          + (f"{StyleUI.MAGENTA}Not duplicates: {stats.groups_ignored}{StyleUI.RESET}   " if stats.groups_ignored else "")
+          + 
           f"{StyleUI.RED}Failed: {stats.failed}{StyleUI.RESET}   "
           f"{StyleUI.BOLD}Space {'that would be freed' if dry else 'freed'}: {format_size(stats.space_saved)}{StyleUI.RESET}")
     if dry:
@@ -499,7 +503,7 @@ def real_delete_mode(base_config: dict) -> str:
 
 def _summary_text(stats: Stats) -> str:
     return (f"{stats.exact_deleted + stats.similar_deleted} removed, {stats.renamed} renamed, "
-            f"{stats.groups_skipped} skipped, {stats.failed} failed")
+            f"{stats.groups_skipped} skipped, {stats.groups_ignored} marked not duplicates, {stats.failed} failed")
 
 
 def run_scan(target: Path, config: dict, settings: dict, index: FolderIndex,
@@ -537,6 +541,7 @@ def run_scan(target: Path, config: dict, settings: dict, index: FolderIndex,
         created=resume.get("created") if resume else None,
         rename=config["rename_numbered"], dry=dry, scanned=scanned,
     )
+    ctx.ignores = IgnoreList(target, enabled=not settings.get("no_ignore", False))
 
     def rel(path: Path) -> str:
         try:

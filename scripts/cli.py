@@ -40,6 +40,8 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--dry-run", action="store_true", help="show what would be deleted, delete nothing")
     review.add_argument("--no-rename", action="store_true",
                         help='keep "(1)" in the names of kept copies')
+    review.add_argument("--no-ignore", action="store_true",
+                        help='show pairs marked "not duplicates" again, for this run')
 
     output = parser.add_argument_group("output")
     output.add_argument("--color", choices=("auto", "always", "never"), help="override colour handling")
@@ -98,6 +100,7 @@ def main(argv: list[str] | None = None) -> int:
     settings = {
         "stages": args.stages,
         "recursive": args.recursive,
+        "no_ignore": args.no_ignore,
         "confirm": "always" if args.interactive else "never" if args.auto else config["confirm"],
     }
 

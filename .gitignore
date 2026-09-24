@@ -10,3 +10,6 @@ venv/
 # Personal settings and the action log stay out of the repository
 config.json
 img_dedupe.log
+
+# Saved review sessions when running from the project folder
+sessions/
