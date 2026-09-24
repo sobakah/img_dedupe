@@ -16,7 +16,7 @@ You need Python 3.9 or newer and [pipx](https://pipx.pypa.io/) (on Fedora: `sudo
 pipx install git+https://github.com/sobakah/img_dedupe.git
 ```
 
-With JPEG XL support: `pipx install "img-dedupe[jxl] @ git+https://github.com/sobakah/img_dedupe.git"`. To install a specific release, add it to the URL: `...img_dedupe.git@v1.1.1`.
+With JPEG XL support: `pipx install "img-dedupe[jxl] @ git+https://github.com/sobakah/img_dedupe.git"`. To install a specific release, add it to the URL: `...img_dedupe.git@v1.2`.
 
 **For videos**, also install ffmpeg (a system package): on Fedora `sudo dnf install ffmpeg-free`, or `ffmpeg` from RPM Fusion. Without it, identical video copies are still found, but not remuxes.
 
@@ -105,7 +105,11 @@ In `permanent` mode, every deletion asks `[y/N]` with No as the default, so pres
 
 Before anything is deleted, every file is checked against the dry run; files that changed in the meantime are left alone.
 
-**Progress is saved after every step**, in dry runs too, so Ctrl+C, a closed terminal or a crash loses nothing. When you open the same folder again, the start screen offers to **resume** (Enter), start a new scan (`n`) or discard the saved session (`x`). A finished dry run stays saved until you carry it out, so you can also do that later: on the start screen, Enter carries it out and `e` goes through its groups again. Before resuming, all files are checked again. A dry run always resumes as a dry run, and a real run never as a dry run.
+**Progress is saved** once the duplicate groups are found, in dry runs too: before every question, after every decision, and at least once a second while groups are handled automatically. Each save is written to disk completely before it replaces the previous one. Ctrl+C, closing the terminal, stopping the program from outside or a crash therefore lose at most the last second of automatic decisions, and those are safe to repeat: before resuming, every file is checked against the disk, and anything already removed or changed is left out. Only an interruption *during* the analysis means starting that scan again.
+
+When you open the same folder again, the start screen offers to **resume** (Enter), start a new scan (`n`) or discard the saved session (`x`). A finished dry run stays saved until you carry it out, so you can also do that later: on the start screen, Enter carries it out and `e` goes through its groups again.
+
+**When resuming**, the groups found by the original scan are used as they are, and the start screen shows which settings can still be changed. Greyed-out rows (stages, videos, subfolders, folder choice) belong to the saved session and are shown with its values. Struck-through choices are unavailable: a *looser* strictness would need a new scan, and a real session can't continue as a dry run. **Stricter works without a new scan**: every group keeps the score of each image, so images above the new limit are simply taken out. Everything else applies: when to ask (`3`, and `uncertain_ratio`), the viewer (`5`) and the rename of "(1)" (`6`). A dry run always resumes as a dry run. A finished dry run is carried out exactly as it showed; only the delete mode (trash or permanent) can be chosen. Press **`n`** to discard the session: all settings are unlocked, and Enter starts a new scan. The summary shows the **totals of the whole session**, including earlier runs.
 
 ## Viewers
 
@@ -157,19 +161,19 @@ All settings can be stored in `config.json`; copy `config.example.json` to start
 | `log_file` | `null` | `null` = default place, `false` = no log, or a file path |
 | `color` | `auto` | `auto`, `always`, `never` |
 | `format_ranks` | JXL > WEBP > AVIF > PNG/TIFF > JPEG > GIF > BMP | preferred formats when choosing the copy to keep |
-| `uncertain_ratio`, `compare_size`, `max_aspect_diff`, `hash_size`, `hash_max_distance` | `0.6`, `512`, `0.02`, `8`, `28` | fine-tuning, see below |
+| `uncertain_ratio`, `compare_size`, `max_aspect_diff`, `hash_size`, `hash_max_distance` | `0.8`, `512`, `0.02`, `8`, `28` | fine-tuning, see below |
 
 ### Fine-tuning the visual comparison
 
 | Key | What it does | Higher | Lower |
 |---|---|---|---|
 | `max_pixel_diff` / `strictness` | Highest score that still counts as the same picture | Also finds heavily compressed copies; tiny edits may slip through | Safer; heavily compressed copies stay on disk |
-| `uncertain_ratio` | Share of the limit above which you are asked (0.6 × 20 = above 12) | Fewer questions (1.0 = never) | More questions (0 = always) |
+| `uncertain_ratio` | Share of the limit above which you are asked (0.8 × 20 = above 16) | Fewer questions (1.0 = never) | More questions (0 = always) |
 | `compare_size` | Comparison size in pixels | Catches smaller watermarks; slower | Faster; small differences blur away |
 | `max_aspect_diff` | Allowed difference in shape (0.02 = 2%) | Slightly cropped copies get compared | Below 0.01, small resized copies can be missed |
 | `hash_max_distance` | How loose the quick pre-check is (of 128 bits) | Finds more candidates; slower, never less accurate | Faster; real duplicates can be missed |
 
-Leave `hash_size` at 8. If different pictures get grouped, use `strict` or raise `compare_size` (e.g. 768); if obvious duplicates are missed, try `loose` or raise `hash_max_distance` (e.g. 36); if you're asked too often, raise `uncertain_ratio` (e.g. 0.75). Check any change with `--dry-run` first.
+Leave `hash_size` at 8. If different pictures get grouped, use `strict` or raise `compare_size` (e.g. 768); if obvious duplicates are missed, try `loose` or raise `hash_max_distance` (e.g. 36); if you're asked too often, raise `uncertain_ratio` (e.g. 0.9), or lower it to be asked more. Check any change with `--dry-run` first.
 
 ## Files and where they are kept
 
@@ -229,7 +233,7 @@ On Windows (not tested yet): `py -m venv .venv`, `.venv\Scripts\pip install Pill
 Raise `__version__` in `scripts/config.py` (the only place the version is set), add the changes to `RELEASE_NOTES.md`, commit, then tag and push:
 
 ```bash
-git tag -a v1.2 -m "img_dedupe 1.2"
+git tag -a v1.3 -m "img_dedupe 1.3"
 git push && git push --tags
 ```
 

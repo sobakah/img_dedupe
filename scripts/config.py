@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-__version__ = "1.1.1"
+__version__ = "1.2"
 PROJECT_URL = "https://github.com/sobakah/img_dedupe"
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -17,7 +17,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "confirm": "uncertain",       # 'uncertain' (ask for borderline groups), 'always', 'never'
     "strictness": "normal",       # 'strict', 'normal', 'loose' (see STRICTNESS_PRESETS)
     "max_pixel_diff": None,       # number overrides the strictness preset
-    "uncertain_ratio": 0.6,       # groups above this fraction of the limit count as borderline
+    "uncertain_ratio": 0.8,       # groups above this fraction of the limit count as borderline
     "compare_size": 512,          # max resolution of the pixel comparison
     "max_aspect_diff": 0.02,      # images whose aspect ratios differ more are never duplicates
     "hash_size": 8,               # dhash grid; hash has 2*size*size bits (128 by default)

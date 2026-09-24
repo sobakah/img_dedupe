@@ -4,7 +4,7 @@
     "confirm": "uncertain",
     "strictness": "normal",
     "max_pixel_diff": null,
-    "uncertain_ratio": 0.6,
+    "uncertain_ratio": 0.8,
     "compare_size": 512,
     "max_aspect_diff": 0.02,
     "hash_size": 8,

@@ -151,6 +151,8 @@ class SessionStore:
             fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=".session-", suffix=".tmp")
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle)
+                handle.flush()
+                os.fsync(handle.fileno())  # on disk before it replaces the old file
             os.replace(tmp, self.path)  # atomic: a crash never leaves half a file
             self.saved = True
         except OSError as exc:
@@ -250,6 +252,8 @@ class IgnoreList:
             fd, tmp = tempfile.mkstemp(dir=self.base, prefix=".img_dedupe_ignore-", suffix=".tmp")
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle, indent=1)
+                handle.flush()
+                os.fsync(handle.fileno())
             os.replace(tmp, self.path)
         except OSError as exc:
             if not self._warned:

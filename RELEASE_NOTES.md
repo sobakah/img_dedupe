@@ -1,5 +1,32 @@
 # Release notes
 
+## img_dedupe 1.2
+
+*Released 2026-09-24*
+
+This release makes saved sessions clearer and more robust, and asks fewer questions.
+
+**Upgrading:** `pipx upgrade img-dedupe`. If your own `config.json` contains `"uncertain_ratio": 0.6` (for example because it was copied from the old example file), change it to `0.8` or remove the line, otherwise it keeps the old behaviour.
+
+### New
+
+- **The start screen shows what a saved session allows.** Settings that belong to the session (stages, videos, subfolders, folder choice) are greyed out and show the session's values; unavailable choices are struck through. `n` discards the session and unlocks all settings, without starting the new scan straight away.
+- **Stricter without a new scan.** When resuming, strictness can be made stricter: images whose saved score is above the new limit are taken out of their groups. A looser limit still needs a new scan.
+- **Session totals.** A resumed session continues its statistics; the summary shows the totals of the whole session, including earlier runs.
+
+### Changed
+
+- **Fewer questions.** `uncertain_ratio` now defaults to 0.8 instead of 0.6: with the normal limit of 20, you are asked about matches above 16 instead of above 12.
+- **More robust saving.** Progress is saved before every question and after every decision, and at most once a second while groups are handled automatically. Every save is written fully to disk before it replaces the previous one.
+- **Stopping from outside.** Closing the terminal or stopping the program (`kill`, shutdown) now works like Ctrl+C: progress is saved and the log is closed.
+- **Carrying out a saved dry run** uses the delete mode chosen on the start screen (trash or permanent).
+
+### Fixed
+
+- Large reviews were slow: the session was saved after every step, costing about a minute per 1,000 groups.
+- When resuming, the rename setting (`6`) and `uncertain_ratio` were not applied to the groups still open.
+- When carrying out a saved dry run from the start screen, the delete mode chosen there was ignored.
+
 ## img_dedupe 1.1.1
 
 *Released 2026-09-24*

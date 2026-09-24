@@ -48,12 +48,13 @@ _ANSI = {
     "CYAN": "\033[36m",
     "WHITE": "\033[37m",
     "GRAY": "\033[90m",
+    "STRIKE": "\033[9m",
 }
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 class StyleUI:
-    RESET = BOLD = DIM = RED = GREEN = YELLOW = BLUE = MAGENTA = CYAN = WHITE = GRAY = ""
+    RESET = BOLD = DIM = RED = GREEN = YELLOW = BLUE = MAGENTA = CYAN = WHITE = GRAY = STRIKE = ""
 
 
 _color_mode = "auto"

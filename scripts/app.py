@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from .config import __version__
-from .core_logic import (ExactGroup, Group, RunContext, Stats, UserQuit,
+from .core_logic import (ExactGroup, Group, RunContext, Stats, UserQuit, stats_from_session,
                         apply_dry_run, find_exact_duplicates, find_remuxes, find_similar_images,
                         dry_run_from_session, format_size, mode_badge, planned_changes,
                         resolve_limit, resume_review, review_dry_run_again)
@@ -285,14 +285,24 @@ def _cycle(value, options):
 _LABEL_WIDTH = 12
 
 
-def _setting(key: str, label: str, options: dict, current, danger=None) -> None:
+def _setting(key: str, label: str, options: dict, current, danger=None,
+             unavailable=(), locked: str | None = None) -> None:
     """One settings row: every choice listed, the current one in normal bold
-    text and the others greyed out. Without colours the current choice is
-    wrapped in ‹ › so it stays recognisable. Wraps to the terminal width."""
+    text and the others greyed out. Choices in *unavailable* are also struck
+    through. A *locked* row is greyed out entirely and shows only its current
+    value, followed by the reason. Without colours, the current choice is
+    wrapped in ‹ ›, unavailable ones are marked ✗ and locked rows are labelled.
+    Wraps to the terminal width."""
+    colored = bool(StyleUI.GRAY)
+    if locked is not None:
+        value = options.get(current, str(current))
+        shown = value if colored else f"‹{value}› (locked)"
+        print(f"  {StyleUI.GRAY}[{key}] {label:<{_LABEL_WIDTH}} {shown}   - {locked}{StyleUI.RESET}")
+        return
+
     prefix = f"  {StyleUI.GRAY}[{key}]{StyleUI.RESET} {StyleUI.BOLD}{label:<{_LABEL_WIDTH}}{StyleUI.RESET} "
     indent = display_width(prefix)
     gap = "   "
-    colored = bool(StyleUI.GRAY)
 
     cells = []
     for value, text in options.items():
@@ -300,6 +310,9 @@ def _setting(key: str, label: str, options: dict, current, danger=None) -> None:
             color = StyleUI.RED if value == danger else ""
             shown = text if colored else f"‹{text}›"
             cells.append((display_width(shown), f"{color}{StyleUI.BOLD}{shown}{StyleUI.RESET}"))
+        elif value in unavailable:
+            shown = text if colored else f"✗{text}"
+            cells.append((display_width(shown), f"{StyleUI.GRAY}{StyleUI.STRIKE}{shown}{StyleUI.RESET}"))
         else:
             cells.append((display_width(text), f"{StyleUI.GRAY}{text}{StyleUI.RESET}"))
 
@@ -315,6 +328,48 @@ def _setting(key: str, label: str, options: dict, current, danger=None) -> None:
         used += extra
     lines.append(gap.join(line))
     print(prefix + ("\n" + " " * indent).join(lines))
+
+
+def _cycle_available(value, options, unavailable=()):
+    """Next choice after *value*, skipping unavailable ones."""
+    keys = [k for k in options if k not in unavailable]
+    if not keys:
+        return value
+    if value not in keys:
+        return keys[0]
+    return keys[(keys.index(value) + 1) % len(keys)]
+
+
+def session_limit(saved: dict) -> int:
+    """The pixel-difference limit a saved session was matched with."""
+    limit = (saved.get("matching") or {}).get("limit")
+    if isinstance(limit, int):
+        return limit
+    return max((g.get("limit", 20) for g in saved.get("groups", [])), default=20)
+
+
+def strictness_choices(config: dict, cap: int | None) -> tuple[dict, str, set, int]:
+    """Options for the strictness row: (options, current, unavailable, effective limit).
+
+    With *cap* (a saved session's limit), only that limit or stricter ones can
+    be used, since loosening would need a new scan."""
+    limit, preset = resolve_limit(config)
+    effective = limit if cap is None else min(limit, cap)
+    options = {name: f"{name} ({value})" for name, value in STRICTNESS_PRESETS.items()}
+    by_value = {value: name for name, value in STRICTNESS_PRESETS.items()}
+    current = by_value.get(effective, "custom")
+    if current == "custom":
+        options = {"custom": f"custom ({effective})", **options}
+    if cap is not None and cap not in by_value and cap != effective:
+        options["saved"] = f"session ({cap})"
+    unavailable = {name for name, value in STRICTNESS_PRESETS.items() if cap is not None and value > cap}
+    return options, current, unavailable, effective
+
+
+def carry_out_mode(config: dict) -> str:
+    """Delete mode for carrying out a dry run: the start screen's choice, unless
+    that is a dry run itself, then the configured real mode."""
+    return config["delete_mode"] if config["delete_mode"] != "dry_run" else real_delete_mode(config)
 
 
 def _info_row(key: str, label: str, text: str) -> None:
@@ -333,6 +388,7 @@ def matching_settings(config: dict, settings: dict, target: Path, index: FolderI
         folders = f"{main} + " + ("all subfolders" if chosen == len(entries) else f"{chosen} of {len(entries)} subfolders")
     return {"limit": limit, "preset": preset, "stages": settings["stages"],
             "recursive": settings["recursive"], "excluded": sorted(settings["excluded"]),
+            "videos": settings.get("videos", True),
             "description": f"{preset} ({limit}) · {folders}"}
 
 
@@ -373,7 +429,7 @@ def _session_panel(saved: dict, rename: bool) -> None:
     print(f"\n{StyleUI.BOLD}Saved session:{StyleUI.RESET} {text}")
     description = saved.get("matching", {}).get("description")
     if description:
-        dim(f"               Matched with: {description}. Settings 1, 2, r and f only affect new scans.")
+        dim(f"               Matched with: {description}.")
 
 
 def _fate(mode: str, count: int) -> str:
@@ -411,24 +467,57 @@ def start_screen(target: Path, config: dict, settings: dict, index: FolderIndex,
             saved_dry = saved_finished = False
             open_groups = 0
 
-        limit, preset = resolve_limit(config)
-        mode = config["delete_mode"]
-        strictness = {name: f"{name} ({value})" for name, value in STRICTNESS_PRESETS.items()}
-        if preset == "custom":
-            strictness = {"custom": f"custom ({limit})", **strictness}
+        # With a saved session, the settings that decided its groups are fixed;
+        # "n" discards the session and unlocks everything for a new scan.
+        session = bool(saved and (open_groups or saved_finished))
+        matching = (saved or {}).get("matching") or {}
+        fixed = "fixed by the saved session"
+        cap = session_limit(saved) if session and not saved_finished else None
+        strictness, strict_current, strict_unavailable, _ = strictness_choices(config, cap)
+        if session and saved_dry and not saved_finished:
+            mode = "dry_run"
+        elif session:
+            mode = carry_out_mode(config) if saved_finished else resume_mode(saved, config, quiet=True)
+        else:
+            mode = config["delete_mode"]
 
         print(f"\n{StyleUI.BOLD}Settings:{StyleUI.RESET} {mode_badge(mode)}")
-        _setting("1", "Stages", STAGE_OPTIONS, settings["stages"])
-        _setting("2", "Strictness", strictness, preset)
+        if session:
+            _setting("1", "Stages", STAGE_OPTIONS, matching.get("stages", settings["stages"]), locked=fixed)
+        else:
+            _setting("1", "Stages", STAGE_OPTIONS, settings["stages"])
+        if saved_finished:
+            locked_limit = session_limit(saved)
+            _setting("2", "Strictness", {"s": f"limit {locked_limit}"}, "s", locked="carried out as the dry run showed")
+        else:
+            _setting("2", "Strictness", strictness, strict_current, unavailable=strict_unavailable)
+            if cap is not None:
+                dim(f"  {' ' * (_LABEL_WIDTH + 5)}Stricter than the session's limit ({cap}) works without a new scan; looser needs one.")
         _setting("3", "Confirm", CONFIRM_OPTIONS, settings["confirm"])
-        _setting("4", "Delete mode", MODE_OPTIONS, mode, danger="permanent")
+        if session and saved_dry and not saved_finished:
+            _setting("4", "Delete mode", MODE_OPTIONS, "dry_run", locked="a dry run resumes as a dry run")
+        elif session:
+            _setting("4", "Delete mode", MODE_OPTIONS, mode, danger="permanent", unavailable={"dry_run"})
+        else:
+            _setting("4", "Delete mode", MODE_OPTIONS, mode, danger="permanent")
         _setting("5", "Viewer", VIEWER_OPTIONS, config["viewer"])
-        _setting("6", "Rename (1)", RENAME_OPTIONS, config["rename_numbered"])
-        _setting("7", "Videos", VIDEO_OPTIONS, settings["videos"])
-        if settings["videos"] and not video_tools_available():
-            dim(f"  {' ' * (_LABEL_WIDTH + 3)}ffmpeg not found: identical video copies are found, remuxes are not.")
-        _setting("r", "Subfolders", SUBFOLDER_OPTIONS, settings["recursive"])
-        if settings["recursive"]:
+        if saved_finished:
+            _setting("6", "Rename (1)", RENAME_OPTIONS, saved.get("rename", config["rename_numbered"]),
+                     locked="carried out as the dry run showed")
+        else:
+            _setting("6", "Rename (1)", RENAME_OPTIONS, config["rename_numbered"])
+        if session:
+            _setting("7", "Videos", VIDEO_OPTIONS, matching.get("videos", settings["videos"]), locked=fixed)
+            _setting("r", "Subfolders", SUBFOLDER_OPTIONS, matching.get("recursive", settings["recursive"]), locked=fixed)
+        else:
+            _setting("7", "Videos", VIDEO_OPTIONS, settings["videos"])
+            if settings["videos"] and not video_tools_available():
+                dim(f"  {' ' * (_LABEL_WIDTH + 5)}ffmpeg not found: identical video copies are found, remuxes are not.")
+            _setting("r", "Subfolders", SUBFOLDER_OPTIONS, settings["recursive"])
+        if session and matching.get("recursive"):
+            description = matching.get("description", "").split(" · ", 1)[-1]
+            _setting("f", "Folders", {"d": description}, "d", locked=fixed)
+        elif not session and settings["recursive"]:
             entries = folder_entries(target, index)
             chosen = sum(1 for rel, _ in entries if rel not in settings["excluded"])
             main_text = ("main folder" if ROOT not in settings["excluded"]
@@ -436,13 +525,17 @@ def start_screen(target: Path, config: dict, settings: dict, index: FolderIndex,
             subs = f"all {len(entries)} subfolders" if chosen == len(entries) else f"{chosen} of {len(entries)} subfolders"
             text = f"{StyleUI.BOLD}{main_text} + {subs}{StyleUI.RESET}"
             _info_row("f", "Folders", f"{text} {StyleUI.GRAY}- press f to choose{StyleUI.RESET}")
-        print(f"  {StyleUI.GRAY}{' ' * (_LABEL_WIDTH + 5)}Press a setting's key to switch to the next choice.{StyleUI.RESET}")
+        if session:
+            print(f"  {StyleUI.GRAY}{' ' * (_LABEL_WIDTH + 5)}Greyed-out settings belong to the saved session. "
+                  f"Press n to start over with all settings.{StyleUI.RESET}")
+        else:
+            print(f"  {StyleUI.GRAY}{' ' * (_LABEL_WIDTH + 5)}Press a setting's key to switch to the next choice.{StyleUI.RESET}")
         if mode == "dry_run":
-            dim(f"  {' ' * (_LABEL_WIDTH + 3)}Dry runs change nothing and are not logged; their progress is saved.")
+            dim(f"  {' ' * (_LABEL_WIDTH + 5)}Dry runs change nothing and are not logged; their progress is saved.")
 
         if saved and saved_finished:
             plan = saved_dry_run(saved, config["rename_numbered"])
-            what = _fate(real_delete_mode(config), plan.to_remove)
+            what = _fate(carry_out_mode(config), plan.to_remove)
             if plan.to_rename:
                 what += f", rename {plan.to_rename}"
             print_primary_action("Enter", f"Carry out the saved dry run: {what}")
@@ -454,12 +547,15 @@ def start_screen(target: Path, config: dict, settings: dict, index: FolderIndex,
         else:
             print_primary_action("Enter", f"Start scan ({in_scope} files)")
 
-        settings_menu = [("1-7", "Next choice for a setting"), ("r", "Toggle subfolders")]
-        if settings["recursive"]:
-            settings_menu.append(("f", "Choose folders"))
+        if session:
+            settings_menu = [("1-7", "Next choice (not greyed-out ones)")]
+        else:
+            settings_menu = [("1-7", "Next choice for a setting"), ("r", "Toggle subfolders")]
+            if settings["recursive"]:
+                settings_menu.append(("f", "Choose folders"))
         groups_menu = [("Settings", settings_menu)]
         if saved:
-            session_menu = [("x", "Discard saved session"), ("n", "New scan instead")]
+            session_menu = [("n", "Start over: discard the session, unlock all settings")]
             if saved_finished:
                 session_menu.insert(0, ("e", "Review its groups again for real"))
             groups_menu.append(("Session", session_menu))
@@ -484,25 +580,38 @@ def start_screen(target: Path, config: dict, settings: dict, index: FolderIndex,
         elif choice in ("x", "n") and saved:
             if confirm(f"{StyleUI.YELLOW}Discard the saved session for this folder?{StyleUI.RESET}"):
                 store.delete()
-                info("Saved session discarded.")
-                if choice == "n" and in_scope >= 2:
-                    return "start", None
+                info("Saved session discarded - all settings can be changed now; Enter starts a new scan.")
+        elif session and choice in ("1", "7", "r", "f"):
+            warn("That setting belongs to the saved session. Press n to start over with all settings.")
+        elif choice == "2" and saved_finished:
+            warn("A finished dry run is carried out as it showed. Press n to start over with all settings.")
         elif choice == "1":
             settings["stages"] = _cycle(settings["stages"], STAGE_OPTIONS)
         elif choice == "2":
-            config["strictness"] = _cycle(config["strictness"] if config["max_pixel_diff"] is None else "loose",
-                                          STRICTNESS_PRESETS)
-            config["max_pixel_diff"] = None  # a preset chosen here wins over a custom limit
+            nxt = _cycle_available(strict_current, strictness, strict_unavailable)
+            if nxt in STRICTNESS_PRESETS:
+                config["strictness"], config["max_pixel_diff"] = nxt, None
+            elif nxt == "saved":
+                config["max_pixel_diff"] = cap
+            if cap is not None and nxt == strict_current:
+                warn(f"Only stricter than the session's limit ({cap}) is possible without a new scan.")
         elif choice == "3":
             settings["confirm"] = _cycle(settings["confirm"], CONFIRM_OPTIONS)
         elif choice == "4":
-            config["delete_mode"] = _cycle(config["delete_mode"], MODE_OPTIONS)
-            if config["delete_mode"] == "permanent":
-                warn("Files will be deleted permanently, not moved to the trash.")
+            if session and saved_dry and not saved_finished:
+                warn("A dry run resumes as a dry run. Press n to start over with all settings.")
+            else:
+                unavailable = {"dry_run"} if session else set()
+                config["delete_mode"] = _cycle_available(mode, MODE_OPTIONS, unavailable)
+                if config["delete_mode"] == "permanent":
+                    warn("Files will be deleted permanently, not moved to the trash.")
         elif choice == "5":
             config["viewer"] = _cycle(config["viewer"], VIEWER_OPTIONS)
         elif choice == "6":
-            config["rename_numbered"] = not config["rename_numbered"]
+            if saved_finished:
+                warn("A finished dry run is carried out as it showed. Press n to start over with all settings.")
+            else:
+                config["rename_numbered"] = not config["rename_numbered"]
         elif choice == "7":
             settings["videos"] = not settings["videos"]
         elif choice == "r":
@@ -515,7 +624,7 @@ def start_screen(target: Path, config: dict, settings: dict, index: FolderIndex,
 
 # --- running -----------------------------------------------------------------
 def print_summary(stats: Stats, delete_mode: str, action_log: ActionLog | None = None,
-                  note: str | None = None) -> None:
+                  note: str | None = None, totals_note: str | None = None) -> None:
     dry = delete_mode == "dry_run"
     verb = "to remove" if dry else "removed"
     print_banner("Summary" + (" - dry run" if dry else ""))
@@ -530,6 +639,8 @@ def print_summary(stats: Stats, delete_mode: str, action_log: ActionLog | None =
           + 
           f"{StyleUI.RED}Failed: {stats.failed}{StyleUI.RESET}   "
           f"{StyleUI.BOLD}Space {'that would be freed' if dry else 'freed'}: {format_size(stats.space_saved)}{StyleUI.RESET}")
+    if totals_note:
+        print(f"  {StyleUI.GRAY}{totals_note}{StyleUI.RESET}")
     if dry:
         print(f"  {StyleUI.GRAY}Nothing was deleted or renamed.{StyleUI.RESET}")
     if action_log is not None and action_log.entries:
@@ -583,8 +694,11 @@ def run_scan(target: Path, config: dict, settings: dict, index: FolderIndex,
         scanned = len(files)
     else:
         scanned = from_dry.scanned if from_dry else int(resume.get("scanned", 0))
-    stats = Stats(scanned=scanned)
+    # A resumed session continues its running totals.
+    stats = stats_from_session(resume, scanned) if resume else Stats(scanned=scanned)
     limit, preset = resolve_limit(config)
+    if resume and limit >= session_limit(resume):  # a looser limit doesn't apply to a saved session
+        limit, preset = session_limit(resume), "session"
     kind = ("resumed dry run" if resume and dry else "resumed session" if resume
             else "dry run applied" if applying else "dry run reviewed again" if from_dry else "new scan")
     action_log = ActionLog(
@@ -599,6 +713,14 @@ def run_scan(target: Path, config: dict, settings: dict, index: FolderIndex,
         rename=config["rename_numbered"], dry=dry, scanned=scanned,
     )
     ctx.ignores = IgnoreList(target, enabled=not settings.get("no_ignore", False))
+    ctx.stats = stats
+    totals_note = None
+    if resume and resume.get("stats"):
+        try:
+            since = datetime.fromisoformat(resume.get("created", "")).strftime("%d %b %Y %H:%M")
+        except ValueError:
+            since = "the first run"
+        totals_note = f"Totals for the whole session since {since}, including earlier runs."
 
     def rel(path: Path) -> str:
         try:
@@ -637,6 +759,7 @@ def run_scan(target: Path, config: dict, settings: dict, index: FolderIndex,
                 else:
                     warn("\nNot enough images left for a visual comparison.")
     except UserQuit:
+        ctx.flush()
         warn("\nStopped by user.")
         note = None
         if ctx.has_saved_session:
@@ -646,10 +769,11 @@ def run_scan(target: Path, config: dict, settings: dict, index: FolderIndex,
                 store.delete()
                 note = "Saved progress deleted."
         action_log.end(f"quit by user · {_summary_text(stats)}")
-        print_summary(stats, config["delete_mode"], action_log, note)
+        print_summary(stats, config["delete_mode"], action_log, note, totals_note)
         return stats, True, None
     except KeyboardInterrupt:
-        action_log.end(f"interrupted (Ctrl+C) · {_summary_text(stats)}")
+        ctx.flush()
+        action_log.end(f"interrupted · {_summary_text(stats)}")
         note = None
         if ctx.has_saved_session:
             note = "Progress saved - run img_dedupe on this folder again to resume."
@@ -657,7 +781,7 @@ def run_scan(target: Path, config: dict, settings: dict, index: FolderIndex,
             note = ("The saved dry run is still there - carry it out again to finish; "
                     "files already handled are skipped.")
         print()
-        print_summary(stats, config["delete_mode"], action_log, note)
+        print_summary(stats, config["delete_mode"], action_log, note, totals_note)
         raise
 
     note = None
@@ -677,7 +801,7 @@ def run_scan(target: Path, config: dict, settings: dict, index: FolderIndex,
         else:
             store.delete()
     action_log.end(f"finished · {_summary_text(stats)}")
-    print_summary(stats, config["delete_mode"], action_log, note)
+    print_summary(stats, config["delete_mode"], action_log, note, totals_note)
     return stats, False, result
 
 
@@ -730,9 +854,10 @@ def run(initial: Path, base_config: dict, base_settings: dict, auto: bool, exclu
 
         choice = None
         if action in ("apply_saved", "review_saved"):
-            stats = carry_out_dry_run(target, config, base_config, settings, index, store,
-                                      saved_dry_run(saved, config["rename_numbered"]),
-                                      review=(action == "review_saved"))
+            run_config = {**config, "rename_numbered": saved.get("rename", config["rename_numbered"])}
+            stats = carry_out_dry_run(target, run_config, base_config, settings, index, store,
+                                      saved_dry_run(saved, run_config["rename_numbered"]),
+                                      review=(action == "review_saved"), mode=carry_out_mode(config))
             if stats is None:  # declined the permanent-deletion question
                 continue
         else:
@@ -763,24 +888,25 @@ def run(initial: Path, base_config: dict, base_settings: dict, auto: bool, exclu
             exit_script(1 if stats.failed else 0)
 
 
-def resume_mode(saved: dict, config: dict) -> str:
+def resume_mode(saved: dict, config: dict, quiet: bool = False) -> str:
     """A session continues the way it was started: a dry run as a dry run, a
     real run never as a dry run (its earlier deletions already happened)."""
     if saved.get("dry_run"):
         mode = "dry_run"
-        if config["delete_mode"] != mode:
+        if config["delete_mode"] != mode and not quiet:
             info("The saved session is a dry run, so it continues as a dry run.")
     else:
         mode = config["delete_mode"] if config["delete_mode"] != "dry_run" else real_delete_mode(config)
-        if config["delete_mode"] == "dry_run":
+        if config["delete_mode"] == "dry_run" and not quiet:
             info(f"The saved session is a real run, so it continues with: {MODE_OPTIONS[mode]}.")
     return mode
 
 
 def carry_out_dry_run(target: Path, config: dict, base_config: dict, settings: dict,
-                      index: FolderIndex, store, dry: DryRun, review: bool) -> Stats | None:
+                      index: FolderIndex, store, dry: DryRun, review: bool,
+                      mode: str | None = None) -> Stats | None:
     """Apply a dry run (or review its groups again) for real. None if declined."""
-    real_mode = real_delete_mode(base_config)
+    real_mode = mode or real_delete_mode(base_config)
     if real_mode == "permanent" and not review and not confirm(
             f"{StyleUI.RED}Permanently delete {dry.to_remove} file(s)? This cannot be undone.{StyleUI.RESET}"):
         return None

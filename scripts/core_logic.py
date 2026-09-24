@@ -7,7 +7,8 @@ import logging
 import os
 import re
 from collections import defaultdict
-from dataclasses import dataclass
+import time
+from dataclasses import asdict, dataclass, fields
 from datetime import datetime
 from pathlib import Path
 
@@ -64,12 +65,19 @@ class RunContext:
         self.index = 0
         self.finished = False
         self.ignores = None       # IgnoreList of pairs marked "not duplicates"
+        self.stats: Stats | None = None   # totals of the whole session, saved with it
+        self._last_save = 0.0
+        self._pending = False     # a throttled save is still due
 
     def record(self, kind: str, path: Path, kept: Path | None = None, detail: str = "") -> None:
         if self.log is not None:
             self.log.action(kind, path, kept, detail)
 
-    def save(self, groups=None, index: int | None = None, finished: bool | None = None) -> None:
+    def save(self, groups=None, index: int | None = None, finished: bool | None = None,
+             throttle: bool = False) -> None:
+        """Write the session. With *throttle*, at most once per second: used while
+        groups are resolved automatically. Losing such a save is harmless, since a
+        resumed session checks every file against the disk first."""
         if groups is not None:
             self.groups = groups
         if index is not None:
@@ -79,17 +87,39 @@ class RunContext:
         # Nothing is worth saving before the groups are known, except a finished dry run.
         if self.store is None or (self.groups is None and not self.finished):
             return
+        now = time.monotonic()
+        if throttle and now - self._last_save < 1.0:
+            self._pending = True
+            return
+        self._pending, self._last_save = False, now
         self.store.save({
             "created": self.created, "matching": self.matching, "index": self.index,
             "dry_run": self.dry, "finished": self.finished, "scanned": self.scanned,
             "groups": [g.to_dict() for g in self.groups or []],
             # A real run removed its exact copies right away; a dry run still has to.
             "exact_groups": [e.to_dict() for e in self.exact_groups] if self.dry else [],
+            "stats": asdict(self.stats) if self.stats is not None else None,
+            "rename": self.rename,
         })
+
+    def flush(self) -> None:
+        """Write a throttled save that is still due (on quitting or interruption)."""
+        if self._pending:
+            self.save()
 
     @property
     def has_saved_session(self) -> bool:
         return self.store is not None and self.store.saved
+
+
+def stats_from_session(data: dict, scanned: int) -> "Stats":
+    """The running totals saved with a session (older sessions have none)."""
+    saved = data.get("stats") or {}
+    known = {f.name for f in fields(Stats)}
+    stats = Stats(**{k: v for k, v in saved.items() if k in known and isinstance(v, int)})
+    if not saved:
+        stats.scanned = scanned
+    return stats
 
 
 def _popcount(x: int) -> int:
@@ -901,7 +931,9 @@ def review_groups(groups: list[Group], config: dict, confirm_mode: str, stats: S
 
     Groups that need no confirmation are resolved as the walk reaches them;
     the others get a full screen. Numbers ([3/12]) always refer to the
-    position in the complete list. The session is saved at every step.
+    position in the complete list. The session is saved before every screen
+    and after every decision; while groups are resolved automatically, at
+    most once per second.
     Returns True when the user wants to keep the saved session.
     """
     total = len(groups)
@@ -910,8 +942,8 @@ def review_groups(groups: list[Group], config: dict, confirm_mode: str, stats: S
     interactive = False    # at least one decision screen was shown
 
     while True:
-        ctx.save(groups, min(index, total - 1))
         if index >= total:
+            ctx.save(groups, total - 1)
             if interactive:
                 success("\nReached the last group.")
                 choice = _overview(groups, None, rel)
@@ -933,15 +965,18 @@ def review_groups(groups: list[Group], config: dict, confirm_mode: str, stats: S
             if not revisit:
                 index += 1
                 continue
+            ctx.save(groups, index)
             navigation = _handled_screen(group, position, rel)
         elif group.status == "pending" and not needs_prompt:
             print(f"\n{StyleUI.BOLD}[{position}]{StyleUI.RESET} {_group_heading(group)}")
             _group_table(group, rel)
             _resolve(group, 0, config, stats, rel, ctx, automatic=True)
             index += 1
+            ctx.save(groups, min(index, total - 1), throttle=True)
             continue
         else:
             interactive = True
+            ctx.save(groups, index)
             navigation = _decision_screen(group, position, config, stats, rel, ctx)
 
         revisit = False
@@ -1021,6 +1056,27 @@ def resume_review(data: dict, config: dict, confirm_mode: str, stats: Stats, rel
     groups, hidden = drop_ignored(groups, ctx.ignores)
     ctx.groups = groups
     report_ignored(hidden, groups)
+    # A stricter limit works without a new scan: every open group keeps the
+    # score of each of its images, so images above the new limit are taken out.
+    new_limit, _ = resolve_limit(config)
+    tightened = 0
+    for group in groups:
+        if group.is_open and new_limit < group.limit:
+            keep = [(m, d) for m, d in zip(group.images[1:], group.diffs[1:]) if d is not None and d <= new_limit]
+            tightened += len(group.images) - 1 - len(keep)
+            group.images = [group.images[0]] + [m for m, _ in keep]
+            group.diffs = [None] + [d for _, d in keep]
+            group.limit = new_limit
+    if tightened:
+        groups = [g for g in groups if not g.is_open or len(g.images) > 1]
+        ctx.groups = groups
+        info(f"Stricter limit {new_limit}: {tightened} image(s) above it no longer count as duplicates; "
+             f"{sum(g.is_open for g in groups)} open group(s) remain.")
+    # Settings that don't need a new scan apply to the groups still open.
+    for group in groups:
+        if group.is_open:
+            group.borderline_above = group.limit * float(config["uncertain_ratio"])
+            group.rename = ctx.rename
     open_groups = [i for i, g in enumerate(groups) if g.is_open]
     if not open_groups:
         info("Nothing left to review in the saved session.")

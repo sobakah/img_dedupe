@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import logging
+import signal
 import sys
 from pathlib import Path
 
@@ -59,6 +60,16 @@ def configure_logging(verbosity: int) -> None:
     logging.basicConfig(level=level, format="%(levelname)s %(name)s: %(message)s", stream=sys.stderr)
 
 
+def stop_on_signals() -> None:
+    """Closing the terminal (SIGHUP) or `kill` / a shutdown (SIGTERM) stop the
+    program like Ctrl+C: progress is saved once more and the log is closed."""
+    def interrupt(signum, frame):
+        raise KeyboardInterrupt
+    for name in ("SIGTERM", "SIGHUP"):
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), interrupt)
+
+
 def missing_packages() -> list[str]:
     return [pip for module, pip in REQUIRED_PACKAGES.items() if importlib.util.find_spec(module) is None]
 
@@ -107,6 +118,7 @@ def main(argv: list[str] | None = None) -> int:
     }
 
     from . import app  # imports Pillow/send2trash, so only after the dependency check
+    stop_on_signals()
 
     try:
         return app.run(Path(args.path), config, settings, auto=args.auto, exclude=args.exclude)
