@@ -16,7 +16,7 @@ You need Python 3.9 or newer and [pipx](https://pipx.pypa.io/) (on Fedora: `sudo
 pipx install git+https://github.com/sobakah/img_dedupe.git
 ```
 
-With JPEG XL support: `pipx install "img-dedupe[jxl] @ git+https://github.com/sobakah/img_dedupe.git"`. To install a specific release, add it to the URL: `...img_dedupe.git@v1.2`.
+With JPEG XL support: `pipx install "img-dedupe[jxl] @ git+https://github.com/sobakah/img_dedupe.git"`. To install a specific release, add it to the URL: `...img_dedupe.git@v1.3`.
 
 **For videos**, also install ffmpeg (a system package): on Fedora `sudo dnf install ffmpeg-free`, or `ffmpeg` from RPM Fusion. Without it, identical video copies are still found, but not remuxes.
 
@@ -40,7 +40,7 @@ The program opens on a **start screen** with the folder, the number of files in 
 
 | Key | Setting |
 |---|---|
-| `1` | Stages: exact + visual, exact only, visual only |
+| `1` | Stages to run: all, identical copies (1+2), visual only (3) |
 | `2` | Strictness of the visual comparison: strict, normal, loose |
 | `3` | When to ask: borderline groups only, every group, never |
 | `4` | Delete mode: trash, dry run, permanent |
@@ -57,11 +57,11 @@ Hidden folders such as `.thumbnails` or `.Trash` are never scanned, and the home
 
 ## How it decides
 
-**Stage 1 – exact copies.** Files with identical content (SHA-256) are grouped; only files of equal size are read, so this is fast. Then videos are checked for **remuxes**: ffprobe reads each video's details from its header, and only videos with the same codec, resolution and length are read in full and their video stream compared. Nothing is decoded. A re-encoded video (other codec, size or quality) is *not* treated as a duplicate.
+**Stage 1 – identical files.** Files with identical content (SHA-256) are grouped, images and videos alike; only files of equal size are read, so this is fast.
 
-For remuxes only the video stream decides. If all copies have the same audio and subtitle tracks, they are handled like exact copies; if the tracks differ, you are asked, and the copy with the most tracks is recommended.
+**Stage 2 – remuxed videos.** ffprobe reads each video's details from its header, and only videos with the same codec, resolution and length are read in full and their video stream compared. Nothing is decoded, and a re-encoded video (other codec, size or quality) is *not* treated as a duplicate. Only the video stream decides: if all copies have the same audio and subtitle tracks, they are handled like identical files; if the tracks differ, you are asked, and the copy with the most tracks is recommended.
 
-**Stage 2 – visually identical images** (images only). A quick fingerprint finds pairs that *might* match; then each is compared pixel by pixel with the image that would be kept. Both are shrunk to the same size (at most 512 px) and cut into 8×8-pixel squares; the score is the difference in the *most different* square, from 0 (identical) to 255. One small changed spot, like a date stamp, is therefore enough to keep two images apart. In tests, re-saves and resizes scored up to 15 and real edits 28 or more; the default limit is 20. Images whose shape differs by more than 2% are never compared, and animated images only take part in Stage 1.
+**Stage 3 – visually identical images** (images only). A quick fingerprint finds pairs that *might* match; then each is compared pixel by pixel with the image that would be kept. Both are shrunk to the same size (at most 512 px) and cut into 8×8-pixel squares; the score is the difference in the *most different* square, from 0 (identical) to 255. One small changed spot, like a date stamp, is therefore enough to keep two images apart. In tests, re-saves and resizes scored up to 15 and real edits 28 or more; the default limit is 20. Images whose shape differs by more than 2% are never compared, and animated images only take part in Stage 1.
 
 **Which copy is kept:**
 
@@ -83,7 +83,7 @@ The groups are numbered (`[3/12]`) and the file to keep is marked `▶`. By defa
 | Key | Action |
 |---|---|
 | **Enter** | Keep the recommended file ▶ and remove the others |
-| `1`–`n` | Keep that file instead |
+| `1`, `2`, … | Keep that file instead (the numbers shown in the group; `#0` is the recommended one) |
 | `s` | Skip: keep all files; the group is shown again next time |
 | `i` | Not duplicates: keep all files and never show this group again |
 | `i2` | Only image #2 is not a duplicate; decide on the rest as usual |
@@ -129,8 +129,8 @@ If the chosen app is missing, img_dedupe says so and uses your default viewer. N
 | Option | Meaning |
 |---|---|
 | `-r`, `--recursive` | Include subfolders |
-| `--exclude DIR` | With `-r`: skip this subfolder (repeatable); `--exclude .` skips the main folder |
-| `--stages {1,2,both}` | Exact copies only, visual only, or both (default) |
+| `--exclude DIR` | With `-r`: skip this subfolder and everything in it (repeatable); `--exclude .` skips only the main folder |
+| `--stages STAGES` | Stages to run, e.g. `1,2` or `3`: 1 identical files, 2 remuxed videos, 3 visually identical images (default `all`) |
 | `--strictness {strict,normal,loose}` | Visual limit 12 / 20 / 28 |
 | `--dry-run` | Show what would be deleted; change nothing |
 | `-i`, `--interactive` | Ask for every group |
@@ -142,7 +142,7 @@ If the chosen app is missing, img_dedupe says so and uses your default viewer. N
 | `--color {auto,always,never}` | Colours; `auto` respects `NO_COLOR` |
 | `-v`, `-vv`, `--verbose` | More log output on stderr |
 
-Exit codes: `0` success, `1` some files could not be removed, `2` bad path, config or missing packages, `130` stopped with Ctrl+C.
+Exit codes: `0` success (also when you quit), `1` some files could not be removed, `2` a bad path or the home/root folder with `--auto`, a bad config file or missing packages, `130` stopped with Ctrl+C. Without `--auto`, a bad path is asked for again instead.
 
 ## Configuration
 
@@ -228,12 +228,37 @@ alias img_dedupe='PYTHONPATH=~/img_dedupe ~/img_dedupe/.venv/bin/python -m scrip
 
 On Windows (not tested yet): `py -m venv .venv`, `.venv\Scripts\pip install Pillow send2trash pyreadline3`, `.venv\Scripts\python -m scripts C:\Pictures`.
 
-## Releasing a new version
+## Running the tests
 
-Raise `__version__` in `scripts/config.py` (the only place the version is set), add the changes to `RELEASE_NOTES.md`, commit, then tag and push:
+The tests need pytest (`pip install -e ".[test]"`, or `pip install pytest` next to Pillow and send2trash) and run from the project folder:
 
 ```bash
-git tag -a v1.3 -m "img_dedupe 1.3"
+python3 -m pytest              # everything, about 15 seconds
+python3 -m pytest -k video     # only tests with "video" in their name
+```
+
+Video tests are skipped if ffmpeg isn't installed, and the H.264 cases if your ffmpeg has no H.264 encoder (like Fedora's `ffmpeg-free`). Every test runs in its own temporary home, config and state folder, so your real settings, log, sessions and trash are never touched.
+
+**Writing a test** is quick with the helpers in `tests/conftest.py`: `library` builds a picture folder (`photo`, `variant`, `copy_of`), `run_cli` runs img_dedupe like a user would, including typed answers (`keys=[...]`), and `summary()` reads the final numbers:
+
+```python
+from conftest import summary
+
+def test_a_backup_copy_is_found(library, run_cli):
+    library.photo("a.png", seed=1)
+    library.copy_of("a.png", "backup/a copy.png")
+    result = run_cli(library.path, "-r", "--auto", "--dry-run")
+    assert summary(result)["exact"] == 1
+```
+
+`tests/pictures.py` makes deterministic photo-like pictures and edited versions (`with_text`, `with_patch`, `brighter`, `downscaled`); `fake_command` puts stand-in programs on the PATH, e.g. to test viewers.
+
+## Releasing a new version
+
+Raise `__version__` in `scripts/config.py` (the only place the version is set), add the changes to `RELEASE_NOTES.md`, run the tests, commit, then tag and push:
+
+```bash
+git tag -a v1.4 -m "img_dedupe 1.4"
 git push && git push --tags
 ```
 
@@ -244,5 +269,5 @@ Without the version bump, `pipx upgrade img-dedupe` doesn't see the new release.
 - An upscaled copy counts as the better one, because it has the higher resolution.
 - Very small watermarks on very large photos can disappear at the 512 px comparison size; raise `compare_size` or use `strict` if that matters.
 - During the visual comparison, a thumbnail of every candidate image is kept in memory (about 768 KB each), so thousands of candidates can need several GB of RAM.
-- Videos are only compared by content; a re-encoded copy is not recognised.
+- Videos are only compared by content; a re-encoded copy is not recognised. MPEG-4 (DivX/Xvid) video inside an MPEG-TS file can't be read by ffmpeg and is left alone.
 - Developed and tested on Linux; macOS and Windows are supported by the code but untested.

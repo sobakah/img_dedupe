@@ -17,7 +17,11 @@ _READABLE_VERSIONS = (1, 2)
 
 
 def state_dir() -> Path:
-    """~/.local/state/img_dedupe (or $XDG_STATE_HOME), %LOCALAPPDATA% on Windows."""
+    """~/.local/state/img_dedupe (or $XDG_STATE_HOME), %LOCALAPPDATA% on Windows.
+    $IMG_DEDUPE_STATE_DIR overrides it (used by the tests)."""
+    override = os.environ.get("IMG_DEDUPE_STATE_DIR")
+    if override:
+        return Path(override)
     if os.name == "nt":
         base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
     else:
@@ -29,6 +33,23 @@ def _stamp() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _write_atomically(fd: int, tmp: str, target: Path, write) -> None:
+    """Write to the temporary file, flush it to disk, then replace *target* in one
+    step: a crash never leaves half a file. On failure the temporary file is removed."""
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            write(handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def resolve_log_path(setting) -> Path | None:
     """config 'log_file': null = default location, false = off, string = that file.
 
@@ -38,7 +59,7 @@ def resolve_log_path(setting) -> Path | None:
     """
     if setting is False:
         return None
-    base = project_dir()
+    base = None if os.environ.get("IMG_DEDUPE_STATE_DIR") else project_dir()
     if base is not None and not os.access(base, os.W_OK):
         warn(f"The project folder {base} is not writable - logging to {state_dir()} instead.")
         base = None
@@ -95,7 +116,7 @@ class ActionLog:
 def sessions_dir() -> Path:
     """Where saved sessions live: ``sessions/`` in the project folder when running
     from a source checkout, otherwise the state directory."""
-    project = project_dir()
+    project = None if os.environ.get("IMG_DEDUPE_STATE_DIR") else project_dir()
     if project is not None and os.access(project, os.W_OK):
         return project / "sessions"
     return state_dir() / "sessions"
@@ -149,11 +170,7 @@ class SessionStore:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=".session-", suffix=".tmp")
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle)
-                handle.flush()
-                os.fsync(handle.fileno())  # on disk before it replaces the old file
-            os.replace(tmp, self.path)  # atomic: a crash never leaves half a file
+            _write_atomically(fd, tmp, self.path, lambda handle: json.dump(payload, handle))
             self.saved = True
         except OSError as exc:
             if not self._warned:
@@ -250,11 +267,7 @@ class IgnoreList:
         }
         try:
             fd, tmp = tempfile.mkstemp(dir=self.base, prefix=".img_dedupe_ignore-", suffix=".tmp")
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, indent=1)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(tmp, self.path)
+            _write_atomically(fd, tmp, self.path, lambda handle: json.dump(payload, handle, indent=1))
         except OSError as exc:
             if not self._warned:
                 self._warned = True

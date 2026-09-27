@@ -24,7 +24,8 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-jxl = ["pillow-jxl-plugin"]  # read .jxl files in Stage 2
+jxl = ["pillow-jxl-plugin"]  # read .jxl files in Stage 3
+test = ["pytest>=7"]
 
 [project.scripts]
 img_dedupe = "img_dedupe.cli:main"
@@ -40,3 +41,7 @@ package-dir = { img_dedupe = "scripts" }
 
 [tool.setuptools.dynamic]
 version = { attr = "img_dedupe.config.__version__" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

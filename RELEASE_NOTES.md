@@ -1,5 +1,36 @@
 # Release notes
 
+## img_dedupe 1.3
+
+*Released 2026-09-24*
+
+This release fixes the problems found in a code review, numbers the stages consistently, and adds a test suite.
+
+**Upgrading:** `pipx upgrade img-dedupe`.
+
+**`--stages` has changed.** The stages are now numbered 1 identical files, 2 remuxed videos, 3 visually identical images, and `--stages` takes these numbers (e.g. `--stages 1,2`). Before, `1` meant identical files *and* remuxes, and `2` meant the visual comparison. If you use `--stages` in scripts: the old `1` is now `1,2`, the old `2` is now `3`; `both` still means all.
+
+### Fixed
+
+- **`--auto` scanned the home or root folder.** It is now refused (exit code 2), as it always was without `--auto`.
+- **`--exclude` didn't cover subfolders:** `--exclude Urlaub` still scanned `Urlaub/Strand`. A folder now takes its subfolders along, like in the folder list.
+- **Invalid numbers in `config.json`** (e.g. `"compare_size": "big"`) silently made the visual comparison find nothing. They are now reported and the default is used.
+- **ffmpeg could hang forever**, e.g. on a network drive; it now gets a time limit that grows with the file size.
+- A failed save (e.g. a full disk) left a temporary file behind.
+- Tab completion failed for folder names with brackets, like `Photos [2024]`.
+- Renaming a kept copy could replace a dangling symbolic link.
+- Removing a hard link was counted as freed space; it is now shown as such, without freeing anything.
+
+### Changed
+
+- **Stages are numbered 1 to 3** everywhere: in the output, in setting 1 on the start screen (*all*, *identical copies (1+2)*, *visual only (3)*) and in `--stages`.
+- README corrections: the keys for keeping another file, and when exit code 2 is used.
+
+### New
+
+- **A test suite** of 116 tests covering the comparison, the three stages, deleting, logging, renaming, folders, sessions, videos, viewers and the command line. Run it with `python3 -m pytest`; `tests/conftest.py` has helpers for writing new tests (see *Running the tests* in the README).
+- `IMG_DEDUPE_STATE_DIR` redirects the log and saved sessions to another folder (used by the tests).
+
 ## img_dedupe 1.2
 
 *Released 2026-09-24*

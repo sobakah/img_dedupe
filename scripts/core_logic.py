@@ -1,4 +1,4 @@
-"""Stage 1 (exact copies) and Stage 2 (visually identical images)."""
+"""Stage 1 (identical files), Stage 2 (remuxed videos), Stage 3 (visually identical images)."""
 
 from __future__ import annotations
 
@@ -156,6 +156,13 @@ def _outcome(symbol: str, label: str, color: str, name: str) -> None:
     print(f"  {color}{symbol} {label:<13}{StyleUI.RESET}{name}")
 
 
+def _same_file(a: Path, b: Path) -> bool:
+    try:
+        return a.samefile(b)
+    except OSError:
+        return False
+
+
 def execute_deletion(keep: Path, others: list[tuple[Path, int]], delete_mode: str,
                      stats: Stats, kind: str, rel, ctx: RunContext, reason: str) -> int:
     """Remove *others*, keeping *keep*. Returns how many were removed."""
@@ -167,6 +174,9 @@ def execute_deletion(keep: Path, others: list[tuple[Path, int]], delete_mode: st
 
     removed = 0
     for path, size in others:
+        hard_link = _same_file(keep, path)  # another name for the kept file: frees no space
+        if hard_link:
+            size = 0
         try:
             if delete_mode == "dry_run":
                 _outcome("○", "Would delete", StyleUI.CYAN, rel(path))
@@ -185,6 +195,8 @@ def execute_deletion(keep: Path, others: list[tuple[Path, int]], delete_mode: st
             ctx.record("FAILED", path, keep, f"{reason}; error: {exc}")
             stats.failed += 1
             continue
+        if hard_link:
+            dim(f"                  (a hard link to {rel(keep)}: only the extra name is removed, no space is freed)")
         removed += 1
         stats.space_saved += size
         if kind == "exact":
@@ -203,14 +215,15 @@ def rename_kept(keep: Path, group_paths: list[Path], delete_mode: str, stats: St
     if target is None or not keep.exists():
         return keep
     being_removed = {p for p in group_paths if p != keep}
+    taken = target.exists() or target.is_symlink()  # a dangling symlink is in the way too
     if delete_mode == "dry_run":
-        if target.exists() and target not in being_removed:
+        if taken and target not in being_removed:
             _outcome("!", "Name taken", StyleUI.YELLOW, f"{target.name} exists, {keep.name} would keep its name")
         else:
             _outcome("○", "Would rename", StyleUI.CYAN, f"{rel(keep)} → {target.name}")
             stats.renamed += 1
         return keep
-    if target.exists():
+    if taken:
         _outcome("!", "Not renamed", StyleUI.YELLOW, f"{target.name} already exists")
         return keep
     try:
@@ -226,7 +239,7 @@ def rename_kept(keep: Path, group_paths: list[Path], delete_mode: str, stats: St
     return target
 
 
-# --- Stage 1 -----------------------------------------------------------------
+# --- Stage 1: identical files -------------------------------------------------
 @dataclass
 class ExactGroup:
     """Files with identical content; files[0] is kept. Each entry: path, size,
@@ -304,8 +317,8 @@ def _apply_exact(group: ExactGroup, number: int, total: int, config: dict, stats
 
 def find_exact_duplicates(files: list[Path], config: dict, stats: Stats, rel,
                           ctx: RunContext) -> tuple[list[Path], list[ExactGroup]]:
-    """Returns (files left for Stage 2, the exact groups found)."""
-    print_banner("Stage 1 · Exact duplicates")
+    """Returns (files left for the next stages, the exact groups found)."""
+    print_banner("Stage 1 · Identical files")
 
     by_size = defaultdict(list)
     for f in files:
@@ -461,7 +474,7 @@ def find_remuxes(files: list[Path], config: dict, confirm_mode: str, stats: Stat
     return sorted(remaining), groups
 
 
-# --- Stage 2: finding groups -------------------------------------------------
+# --- Stage 3: finding groups -------------------------------------------------
 _SAVED_FIELDS = ("width", "height", "resolution", "format", "format_rank", "lossless",
                  "bpp", "age", "size", "mtime_ns", "numbered")
 
@@ -696,7 +709,7 @@ def find_groups(files: list[Path], config: dict, rel) -> list[Group]:
     return groups
 
 
-# --- Stage 2: presenting and resolving groups --------------------------------
+# --- Stage 3: presenting and resolving groups --------------------------------
 def _group_table(group: Group, rel, keep_index: int = 0, done: bool = False) -> None:
     rows = []
     for i, (meta, diff) in enumerate(zip(group.images, group.diffs)):
@@ -1044,8 +1057,26 @@ def validate_groups(groups: list[Group]) -> tuple[list[Group], int, int]:
     return kept_groups, dropped_groups, dropped_images
 
 
+def tighten_groups(groups: list[Group], limit: int) -> tuple[list[Group], int]:
+    """Apply a stricter limit to the open groups, without a new scan: every group
+    keeps the score of each of its images, so images above *limit* are taken out
+    and groups left with only their recommended image disappear. A looser limit
+    changes nothing. Returns (groups, images taken out)."""
+    removed = 0
+    for group in groups:
+        if group.is_open and limit < group.limit:
+            keep = [(m, d) for m, d in zip(group.images[1:], group.diffs[1:]) if d is not None and d <= limit]
+            removed += len(group.images) - 1 - len(keep)
+            group.images = [group.images[0]] + [m for m, _ in keep]
+            group.diffs = [None] + [d for _, d in keep]
+            group.limit = limit
+    if removed:
+        groups = [g for g in groups if not g.is_open or len(g.images) > 1]
+    return groups, removed
+
+
 def resume_review(data: dict, config: dict, confirm_mode: str, stats: Stats, rel, ctx: RunContext) -> bool:
-    print_banner("Stage 2 · Visually identical images (resumed)" + (" - dry run" if ctx.dry else ""))
+    print_banner("Stage 3 · Visually identical images (resumed)" + (" - dry run" if ctx.dry else ""))
     ctx.exact_groups = [ExactGroup.from_dict(e) for e in data.get("exact_groups", [])]
     groups = [Group.from_dict(g) for g in data["groups"]]
     groups, dropped_groups, dropped_images = validate_groups(groups)
@@ -1056,19 +1087,9 @@ def resume_review(data: dict, config: dict, confirm_mode: str, stats: Stats, rel
     groups, hidden = drop_ignored(groups, ctx.ignores)
     ctx.groups = groups
     report_ignored(hidden, groups)
-    # A stricter limit works without a new scan: every open group keeps the
-    # score of each of its images, so images above the new limit are taken out.
     new_limit, _ = resolve_limit(config)
-    tightened = 0
-    for group in groups:
-        if group.is_open and new_limit < group.limit:
-            keep = [(m, d) for m, d in zip(group.images[1:], group.diffs[1:]) if d is not None and d <= new_limit]
-            tightened += len(group.images) - 1 - len(keep)
-            group.images = [group.images[0]] + [m for m, _ in keep]
-            group.diffs = [None] + [d for _, d in keep]
-            group.limit = new_limit
+    groups, tightened = tighten_groups(groups, new_limit)
     if tightened:
-        groups = [g for g in groups if not g.is_open or len(g.images) > 1]
         ctx.groups = groups
         info(f"Stricter limit {new_limit}: {tightened} image(s) above it no longer count as duplicates; "
              f"{sum(g.is_open for g in groups)} open group(s) remain.")
@@ -1138,7 +1159,7 @@ def _check_decided(groups: list[Group]) -> tuple[list[Group], int]:
 
 
 def _follow_renames(groups: list[Group], renamed: dict[Path, Path]) -> None:
-    """Stage 1 may have renamed a file ("a (1).png" -> "a.png") that Stage 2 groups refer to."""
+    """Stages 1 and 2 may have renamed a file ("a (1).png" -> "a.png") that Stage 3 groups refer to."""
     for group in groups:
         for meta in group.images:
             if meta["path"] in renamed:
@@ -1148,12 +1169,14 @@ def _follow_renames(groups: list[Group], renamed: dict[Path, Path]) -> None:
 def _apply_all_exact(exact_groups: list[ExactGroup], config: dict, stats: Stats, rel,
                      ctx: RunContext, how: str) -> dict[Path, Path]:
     renamed = {}
-    if exact_groups:
-        print_banner("Stage 1 · Exact duplicates and remuxed videos")
-    for number, group in enumerate(exact_groups, 1):
-        new_path = _apply_exact(group, number, len(exact_groups), config, stats, rel, ctx, _reason(group, how))
-        if new_path != group.paths[0]:
-            renamed[group.paths[0]] = new_path
+    for kind, banner in (("exact", "Stage 1 · Identical files"), ("remux", "Stage 2 · Remuxed videos")):
+        of_kind = [g for g in exact_groups if g.kind == kind]
+        if of_kind:
+            print_banner(banner)
+        for number, group in enumerate(of_kind, 1):
+            new_path = _apply_exact(group, number, len(of_kind), config, stats, rel, ctx, _reason(group, how))
+            if new_path != group.paths[0]:
+                renamed[group.paths[0]] = new_path
     return renamed
 
 
@@ -1170,7 +1193,7 @@ def apply_dry_run(exact_groups: list[ExactGroup], groups: list[Group], config: d
     if dropped_files or dropped_images:
         warn(f"{dropped_files + dropped_images} file(s) changed on disk since the dry run and were left alone.")
     if decided or skipped:
-        print_banner("Stage 2 · Visually identical images")
+        print_banner("Stage 3 · Visually identical images")
     for number, group in enumerate(decided, 1):
         how = "automatic" if group.decision == "automatic" else "chosen by user"
         reason = f"visual match (worst diff {group.worst}/{group.limit}), {how} in the dry run"
@@ -1199,7 +1222,7 @@ def review_dry_run_again(exact_groups: list[ExactGroup], groups: list[Group], co
         warn("Some files changed on disk since the dry run and were left alone.")
     if not groups:
         return False
-    print_banner("Stage 2 · Visually identical images")
+    print_banner("Stage 3 · Visually identical images")
     return review_groups(groups, config, confirm_mode, stats, rel, ctx)
 
 

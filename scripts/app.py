@@ -26,7 +26,20 @@ _NATURAL_RE = re.compile(r"(\d+)")
 ROOT = "."
 
 # Choices per setting, in the order the setting key cycles through them.
-STAGE_OPTIONS = {"both": "exact + visual", "1": "exact only", "2": "visual only"}
+STAGE_OPTIONS = {"1,2,3": "all", "1,2": "identical copies (1+2)", "3": "visual only (3)"}
+_LEGACY_STAGES = {"both": "1,2,3", "1": "1,2", "2": "3"}  # values stored by sessions before 1.2.1
+
+
+def stage_options(current: str) -> dict:
+    """The start screen's stage choices, plus *current* if it is another combination."""
+    if current in STAGE_OPTIONS:
+        return STAGE_OPTIONS
+    return {**STAGE_OPTIONS, current: f"stages {current}"}
+
+
+def session_stages(matching: dict, fallback: str) -> str:
+    stages = matching.get("stages", fallback)
+    return _LEGACY_STAGES.get(stages, stages) if matching.get("stages_version") != 2 else stages
 CONFIRM_OPTIONS = {"uncertain": "borderline only", "always": "every group", "never": "never"}
 MODE_OPTIONS = {"trash": "trash", "dry_run": "dry run", "permanent": "permanent"}
 VIEWER_OPTIONS = {"auto": "auto", "identity": "identity", "imagecompare": "imagecompare",
@@ -115,6 +128,11 @@ class FolderIndex:
         self._cache.clear()
 
 
+def is_protected(path: Path) -> bool:
+    """The home or root folder: never scanned, to prevent large-scale accidents."""
+    return path == Path.home() or path == Path(path.anchor)
+
+
 def resolve_directory(initial: Path | None, index: FolderIndex,
                       allow_cancel: bool = False) -> Path | None:
     """Find a usable folder, prompting until one is given (lrckit behaviour).
@@ -125,7 +143,7 @@ def resolve_directory(initial: Path | None, index: FolderIndex,
     while True:
         if current is not None:
             resolved = current.expanduser().resolve()
-            if resolved == Path.home() or resolved == Path(resolved.anchor):
+            if is_protected(resolved):
                 warn(f"\nExecution in root or home directory ('{resolved}') detected.")
                 warn("To prevent unintended large-scale deletions, please select a specific picture folder.")
             elif resolved.is_dir():
@@ -185,6 +203,23 @@ def parse_numbers(text: str, upper: int) -> list[int] | None:
             return None
         numbers.extend(range(low, high + 1))
     return numbers or None
+
+
+def switch_folders(excluded: set, entries: list[tuple[str, int]], numbers: list[int]) -> None:
+    """Switch the listed folders (1-based numbers into *entries*) in *excluded*.
+
+    Every listed folder switches on its own, judged by its state before this
+    input ("4,1" selects 4 and unselects 1). A folder takes the folders below it
+    along; parents go first, so a listed subfolder's own switch wins over its
+    parent's."""
+    listed = {entries[n - 1][0] for n in numbers}
+    targets = {rel: rel in excluded for rel in listed}  # True = switch on
+    for rel in sorted(listed, key=lambda r: r.count("/")):
+        for below in _below(rel, entries):
+            if targets[rel]:
+                excluded.discard(below)
+            else:
+                excluded.add(below)
 
 
 def choose_folders(base_dir: Path, index: FolderIndex, settings: dict) -> None:
@@ -262,18 +297,7 @@ def choose_folders(base_dir: Path, index: FolderIndex, settings: dict) -> None:
             if numbers is None:
                 warn("Unknown option.")
                 continue
-            # Every listed folder switches on its own, judged by its state before
-            # this input ("4,1" selects 4 and unselects 1). A folder takes the
-            # folders below it along; parents go first, so a listed subfolder's
-            # own switch wins over its parent's.
-            listed = {entries[n - 1][0] for n in numbers}
-            targets = {rel: rel in excluded for rel in listed}  # True = switch on
-            for rel in sorted(listed, key=lambda r: r.count("/")):
-                for below in _below(rel, entries):
-                    if targets[rel]:
-                        excluded.discard(below)
-                    else:
-                        excluded.add(below)
+            switch_folders(excluded, entries, numbers)
 
 
 # --- start screen ------------------------------------------------------------
@@ -386,7 +410,7 @@ def matching_settings(config: dict, settings: dict, target: Path, index: FolderI
         chosen = sum(1 for rel, _ in entries if rel not in settings["excluded"])
         main = "main folder" if ROOT not in settings["excluded"] else "main folder excluded"
         folders = f"{main} + " + ("all subfolders" if chosen == len(entries) else f"{chosen} of {len(entries)} subfolders")
-    return {"limit": limit, "preset": preset, "stages": settings["stages"],
+    return {"limit": limit, "preset": preset, "stages": settings["stages"], "stages_version": 2,
             "recursive": settings["recursive"], "excluded": sorted(settings["excluded"]),
             "videos": settings.get("videos", True),
             "description": f"{preset} ({limit}) · {folders}"}
@@ -483,9 +507,10 @@ def start_screen(target: Path, config: dict, settings: dict, index: FolderIndex,
 
         print(f"\n{StyleUI.BOLD}Settings:{StyleUI.RESET} {mode_badge(mode)}")
         if session:
-            _setting("1", "Stages", STAGE_OPTIONS, matching.get("stages", settings["stages"]), locked=fixed)
+            stages = session_stages(matching, settings["stages"])
+            _setting("1", "Stages", stage_options(stages), stages, locked=fixed)
         else:
-            _setting("1", "Stages", STAGE_OPTIONS, settings["stages"])
+            _setting("1", "Stages", stage_options(settings["stages"]), settings["stages"])
         if saved_finished:
             locked_limit = session_limit(saved)
             _setting("2", "Strictness", {"s": f"limit {locked_limit}"}, "s", locked="carried out as the dry run showed")
@@ -743,15 +768,16 @@ def run_scan(target: Path, config: dict, settings: dict, index: FolderIndex,
         else:
             videos = sum(1 for f in files if is_video(f))
             info(f"\nScanning {len(files) - videos} images and {videos} videos in {target}")
-            if settings["stages"] in ("1", "both"):
+            stages = set(settings["stages"].split(","))
+            remaining, exact_groups, remux_groups = files, [], []
+            if "1" in stages:
                 remaining, exact_groups = find_exact_duplicates(files, config, stats, rel, ctx)
                 ctx.exact_groups = exact_groups
+            if "2" in stages:
                 remaining, remux_groups = find_remuxes(remaining, config, settings["confirm"], stats, rel, ctx)
-                ctx.exact_groups = exact_groups + remux_groups
-            else:
-                remaining = files
+            ctx.exact_groups = exact_groups + remux_groups
             remaining = [f for f in remaining if not is_video(f)]  # visual matching is for images only
-            if settings["stages"] in ("2", "both"):
+            if "3" in stages:
                 if len(remaining) > 1:
                     keep_session, groups = find_similar_images(remaining, config, settings["confirm"],
                                                                stats, rel, ctx)
@@ -820,6 +846,10 @@ def normalize_excluded(target: Path, folders) -> set[str]:
             warn(f"--exclude {folder}: no such folder in {target}, ignored.")
             continue
         result.add(rel)
+        if rel != ROOT:  # like the folder list: a folder takes its subfolders along
+            for root, dirs, _ in os.walk(target / rel, followlinks=False):
+                dirs[:] = [d for d in dirs if not d.startswith(".")]
+                result.update((Path(root) / d).relative_to(target).as_posix() for d in dirs)
     return result
 
 
@@ -831,6 +861,9 @@ def run(initial: Path, base_config: dict, base_settings: dict, auto: bool, exclu
         target = initial.expanduser().resolve()
         if not target.is_dir():
             error(f"Not a directory: {target}")
+            return 2
+        if is_protected(target):
+            error(f"Refusing to scan the root or home folder ({target}); choose a specific picture folder.")
             return 2
         settings = {**base_settings, "excluded": normalize_excluded(target, exclude)}
         stats, _, _ = run_scan(target, dict(base_config), settings, index, store=None)

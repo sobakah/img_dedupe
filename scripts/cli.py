@@ -15,6 +15,17 @@ from .config import __version__, load_config
 REQUIRED_PACKAGES = {"PIL": "Pillow", "send2trash": "send2trash"}
 
 
+def parse_stages(text: str) -> str:
+    """'all' (or the old 'both'), or stage numbers like '1,2' or '3'; returns e.g. '1,2'."""
+    text = text.strip().lower()
+    if text in ("all", "both"):
+        return "1,2,3"
+    numbers = {part.strip() for part in text.replace(" ", ",").split(",") if part.strip()}
+    if not numbers or not numbers <= {"1", "2", "3"}:
+        raise argparse.ArgumentTypeError("use 'all' or stage numbers 1-3, e.g. 1,2 or 3")
+    return ",".join(sorted(numbers))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="img_dedupe",
@@ -29,8 +40,9 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("-r", "--recursive", action="store_true", help="include subdirectories")
     scan.add_argument("--exclude", action="append", metavar="DIR", default=[],
                       help="with -r, skip this subfolder (relative to the scanned folder; repeatable)")
-    scan.add_argument("--stages", choices=("1", "2", "both"), default="both",
-                      help="1 = exact copies only, 2 = visual matches only, both (default)")
+    scan.add_argument("--stages", type=parse_stages, default="1,2,3", metavar="STAGES",
+                      help="stages to run: 1 identical files, 2 remuxed videos, 3 visually identical "
+                           "images; e.g. 1,2 or 3 (default: all)")
     scan.add_argument("--no-videos", action="store_true", help="leave video files out of the scan")
     scan.add_argument("--strictness", choices=("strict", "normal", "loose"), help="override the configured strictness")
 

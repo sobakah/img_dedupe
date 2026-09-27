@@ -415,11 +415,18 @@ def print_primary_action(key: str, description: str) -> None:
 
 
 # --- path completion ---------------------------------------------------------
+_completions: list[str] = []
+
+
 def complete_path(text: str, state: int):
-    expanded = os.path.expanduser(text)
-    matches = glob.glob(expanded + "*")
-    results = [m + (os.sep if os.path.isdir(m) else " ") for m in matches]
-    return results[state] if state < len(results) else None
+    """Readline completer. The folder is listed once per Tab (state 0); brackets
+    and other glob characters in names are taken literally."""
+    global _completions
+    if state == 0:
+        expanded = os.path.expanduser(text)
+        matches = sorted(glob.glob(glob.escape(expanded) + "*"))
+        _completions = [m + (os.sep if os.path.isdir(m) else " ") for m in matches]
+    return _completions[state] if state < len(_completions) else None
 
 
 def enable_path_completion() -> None:

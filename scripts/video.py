@@ -81,8 +81,11 @@ def video_stream_hash(path: Path, codec: str) -> str | None:
         argv += ["-bsf:v", _PICTURE_ONLY_FILTERS[codec]]
     argv += ["-f", "streamhash", "-hash", "sha256", "-"]
     try:
-        result = subprocess.run(argv, capture_output=True, text=True)
-    except OSError:
+        size = path.stat().st_size
+        # Generous: 2 minutes plus 5 MB/s, so a 50 GB file on a slow network drive
+        # still gets hours, while a hung ffmpeg doesn't block the scan forever.
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=120 + size / (5 * 1024 * 1024))
+    except (OSError, subprocess.TimeoutExpired):
         return None
     if result.returncode != 0:  # includes ffmpeg crashing on a damaged file
         return None

@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-__version__ = "1.2"
+__version__ = "1.3"
 PROJECT_URL = "https://github.com/sobakah/img_dedupe"
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -42,6 +42,26 @@ VALID_CHOICES = {
 }
 DEPRECATED_KEYS = {"threshold", "hash_algo"}
 
+# Numeric settings: (type, minimum, maximum). Invalid values fall back to the default,
+# instead of silently breaking the comparison later on.
+NUMERIC_RANGES = {
+    "max_pixel_diff": (int, 0, 255),
+    "uncertain_ratio": (float, 0.0, 1.0),
+    "compare_size": (int, 64, 4096),
+    "max_aspect_diff": (float, 0.0, 1.0),
+    "hash_size": (int, 4, 32),
+    "hash_max_distance": (int, 0, 2048),
+}
+
+
+def _number_ok(key: str, value) -> bool:
+    kind, low, high = NUMERIC_RANGES[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    if kind is int and not float(value).is_integer():
+        return False
+    return low <= value <= high
+
 
 def project_dir() -> Path | None:
     """The project folder when running from a source checkout (git clone,
@@ -74,6 +94,10 @@ def _merge(user_config: dict, path: Path, warnings: list[str]) -> dict:
         elif key in VALID_CHOICES and value not in VALID_CHOICES[key]:
             warnings.append(f"Invalid value {value!r} for '{key}', using {DEFAULT_CONFIG[key]!r}. "
                             f"Choices: {', '.join(VALID_CHOICES[key])}.")
+        elif key in NUMERIC_RANGES and not (key == "max_pixel_diff" and value is None) and not _number_ok(key, value):
+            kind, low, high = NUMERIC_RANGES[key]
+            what = "a whole number" if kind is int else "a number"
+            warnings.append(f"'{key}' must be {what} from {low} to {high}, using {DEFAULT_CONFIG[key]!r}.")
         elif key in ("rename_numbered", "save_sessions", "include_videos") and not isinstance(value, bool):
             warnings.append(f"'{key}' must be true or false, using {DEFAULT_CONFIG[key]!r}.")
         elif key == "log_file" and not (value is None or value is False or isinstance(value, str)):
@@ -86,6 +110,10 @@ def _merge(user_config: dict, path: Path, warnings: list[str]) -> dict:
         else:
             config[key] = value
     return config
+
+
+def _rank_ok(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def load_config(explicit_path: Path | None = None) -> tuple[dict, list[str]]:
@@ -106,6 +134,17 @@ def load_config(explicit_path: Path | None = None) -> tuple[dict, list[str]]:
             warnings.append(f"Configuration file '{path}' is not a JSON object, using defaults.")
             continue
         config = _merge(loaded, path, warnings)
+        bits = 2 * int(config["hash_size"]) ** 2
+        if config["hash_max_distance"] > bits:
+            warnings.append(f"'hash_max_distance' can't exceed {bits} (2 x hash_size^2), using {min(28, bits)}.")
+            config["hash_max_distance"] = min(28, bits)
+        for key in ("hash_size", "hash_max_distance", "compare_size"):
+            config[key] = int(config[key])
+        if config["max_pixel_diff"] is not None:
+            config["max_pixel_diff"] = int(config["max_pixel_diff"])
+        if not all(_rank_ok(v) for v in config["format_ranks"].values()):
+            warnings.append("'format_ranks' values must be numbers, using the defaults.")
+            config["format_ranks"] = copy.deepcopy(DEFAULT_CONFIG["format_ranks"])
         config["_source"] = str(path)
         return config, warnings
 

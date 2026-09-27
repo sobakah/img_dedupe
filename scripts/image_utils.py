@@ -13,7 +13,7 @@ except Exception:  # pragma: no cover - Pillow built without littlecms
     ImageCms = None
 
 # Optional JPEG XL support. Pillow cannot read JXL on its own; without this
-# plugin JXL files are still handled by Stage 1 but skipped (and reported) in Stage 2.
+# plugin JXL files are still handled by Stage 1 but skipped (and reported) in Stage 3.
 try:
     import pillow_jxl  # noqa: F401  (registers the JXL format with Pillow)
     JXL_SUPPORTED = True
@@ -238,6 +238,8 @@ def pixel_difference(thumb_a, thumb_b):
 
 
 def aspect_ratio_close(a, b, tolerance):
+    if min(a['width'], a['height'], b['width'], b['height']) <= 0:
+        return False
     ra, rb = a['width'] / a['height'], b['width'] / b['height']
     return abs(ra - rb) / max(ra, rb) <= tolerance
 
