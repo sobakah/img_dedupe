@@ -230,11 +230,27 @@ On Windows (not tested yet): `py -m venv .venv`, `.venv\Scripts\pip install Pill
 
 ## Running the tests
 
-The tests need pytest (`pip install -e ".[test]"`, or `pip install pytest` next to Pillow and send2trash) and run from the project folder:
+The tests belong to the repository, not to the installed program: pipx installs only img_dedupe itself, without the tests or pytest. So you need a clone of the repository, and the tests check the code in that clone.
+
+**With your pipx installation.** It already has Pillow and send2trash; add pytest to it once, then run the tests of a clone with its Python:
 
 ```bash
-python3 -m pytest              # everything, about 15 seconds
-python3 -m pytest -k video     # only tests with "video" in their name
+pipx inject img-dedupe pytest
+git clone https://github.com/sobakah/img_dedupe.git
+cd img_dedupe
+git checkout v1.3        # optional: the version you have installed (see img_dedupe --version)
+"$(pipx environment --value PIPX_LOCAL_VENVS)/img-dedupe/bin/python" -m pytest
+```
+
+`pipx uninject img-dedupe pytest` removes pytest again; the program keeps working. (`pipx run pytest` does *not* work: it starts pytest in a separate environment without Pillow.)
+
+**In a development setup**, independent of any pipx installation:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -e ".[test]"
+.venv/bin/python -m pytest              # everything, about 15 seconds
+.venv/bin/python -m pytest -k video     # only tests with "video" in their name
 ```
 
 Video tests are skipped if ffmpeg isn't installed, and the H.264 cases if your ffmpeg has no H.264 encoder (like Fedora's `ffmpeg-free`). Every test runs in its own temporary home, config and state folder, so your real settings, log, sessions and trash are never touched.

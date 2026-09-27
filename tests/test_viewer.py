@@ -15,13 +15,24 @@ def images(tmp_path):
     return paths
 
 
+class Fakes:
+    """Makes more stand-ins; .xdg is the stand-in for the default viewer."""
+
+    def __init__(self, make, xdg):
+        self.make, self.xdg = make, xdg
+
+    def __call__(self, *args, **kwargs):
+        return self.make(*args, **kwargs)
+
+
 @pytest.fixture
 def only_fakes(fake_command, monkeypatch, tmp_path):
-    """Nothing but the stand-ins on PATH, so real viewers on this machine don't interfere."""
+    """Nothing but the stand-ins on PATH, so real viewers on this machine don't interfere
+    (a test for "Flatpak isn't installed" must not find the real one)."""
     monkeypatch.setattr(viewer, "_flatpak_state", {})
-    fake_command("xdg-open")
+    xdg = fake_command("xdg-open")
     monkeypatch.setenv("PATH", str(tmp_path / "fakebin"))
-    return fake_command
+    return Fakes(fake_command, xdg)
 
 
 def test_native_image_compare_is_preferred(only_fakes, images):
@@ -43,6 +54,7 @@ def test_missing_app_falls_back_to_the_default_viewer(only_fakes, images, capsys
     assert "flatpak install flathub org.gnome.gitlab.YaLTeR.Identity" in capsys.readouterr().out
 
 
-def test_without_flatpak_the_default_viewer_is_used(only_fakes, images, tmp_path):
+def test_without_flatpak_the_default_viewer_is_used(only_fakes, images):
     assert viewer.open_image_viewer(images, "identity") == "the default viewer"
-    assert (tmp_path / "xdg-open.calls").exists()
+    # the default viewer is started in the background, once per image: wait for both
+    assert sorted(only_fakes.xdg.calls(count=2)) == sorted([[str(p)] for p in images])

@@ -160,11 +160,15 @@ def fake_command(tmp_path, monkeypatch):
         path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
         class Command:
-            def calls(self, wait: float = 3.0) -> list[list[str]]:
-                end = time.time() + wait  # viewers are started in the background
-                while not log.exists() and time.time() < end:
+            def calls(self, count: int = 1, wait: float = 5.0) -> list[list[str]]:
+                """The recorded calls, waiting up to *wait* seconds for *count* of
+                them: viewers are started in the background and may take a moment."""
+                def read():
+                    return [line.split(" ") for line in log.read_text().splitlines()] if log.exists() else []
+                end = time.time() + wait
+                while len(read()) < count and time.time() < end:
                     time.sleep(0.05)
-                return [line.split(" ") for line in log.read_text().splitlines()] if log.exists() else []
+                return read()
         return Command()
     return make
 
