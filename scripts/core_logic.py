@@ -390,7 +390,7 @@ def find_remuxes(files: list[Path], config: dict, confirm_mode: str, stats: Stat
     videos = [f for f in files if is_video(f)]
     if len(videos) < 2:
         return files, []
-    print_banner("Stage 1 · Remuxed videos")
+    print_banner("Stage 2 · Remuxed videos")
     if not video_tools_available():
         warn("ffmpeg/ffprobe not found - remuxed videos can't be detected (identical copies still are).")
         return files, []
@@ -998,7 +998,7 @@ def find_similar_images(files: list[Path], config: dict, confirm_mode: str, stat
                         ctx: RunContext) -> tuple[bool, list[Group]]:
     """Returns (keep the saved session?, the groups found)."""
     limit, preset = resolve_limit(config)
-    print_banner("Stage 2 · Visually identical images")
+    print_banner("Stage 3 · Visually identical images")
     print(f"{StyleUI.BOLD}Limit:{StyleUI.RESET} {limit} ({preset})   "
           f"{StyleUI.BOLD}Confirm:{StyleUI.RESET} {confirm_mode}   {mode_badge(config['delete_mode'])}")
 
