@@ -2,6 +2,8 @@
 
 ## img_dedupe 1.4
 
+*Released 2026-10-02*
+
 This release fixes the data-safety problems found in an independent code review.
 
 ### Fixed
