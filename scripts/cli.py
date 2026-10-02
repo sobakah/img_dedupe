@@ -96,6 +96,7 @@ def main(argv: list[str] | None = None) -> int:
     config["_configured_delete_mode"] = config["delete_mode"]  # what "for real" means after a dry run
     if args.dry_run:
         config["delete_mode"] = "dry_run"
+    config["_cli_dry_run"] = args.dry_run  # the start screen then never deletes anything
     if args.no_rename:
         config["rename_numbered"] = False
     if args.strictness:

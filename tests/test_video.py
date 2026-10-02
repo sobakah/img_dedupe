@@ -79,3 +79,40 @@ def test_no_videos_leaves_them_out(library, run_cli):
     make_video(library / "clip.mp4", codec="mpeg4")
     library.copy_of("clip.mp4", "clip copy.mp4")
     assert summary(run_cli(library.path, "--auto", "--dry-run", "--no-videos"))["scanned"] == 0
+
+
+def with_other_sound(source, target):
+    """The same video stream with another sound track (like a dub), also tagged 'und'."""
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(source),
+                    "-f", "lavfi", "-i", "sine=frequency=880:duration=3", "-map", "0:v", "-map", "1:a",
+                    "-c:v", "copy", "-c:a", "aac", "-shortest", str(target)], check=True)
+    return target
+
+
+def test_other_sound_is_never_removed_automatically(library, run_cli):
+    clip = make_video(library / "clip.mp4", codec="mpeg4")
+    with_other_sound(clip, library / "dub.mkv")
+    before = library.files()
+    result = run_cli(library.path, "--auto")
+    assert "Left alone" in result.stdout
+    assert summary(result)["remux"] == 0
+    assert library.files() == before
+
+
+def test_other_sound_is_asked_about(library, run_cli):
+    clip = make_video(library / "clip.mp4", codec="mpeg4")
+    with_other_sound(clip, library / "dub.mkv")
+    result = run_cli(library.path, "--dry-run", keys=["", "s", "q"])     # start, skip the question, quit
+    assert "TRACKS DIFFER" in result.stdout and "No file contains all tracks" in result.stdout
+
+
+def test_a_copy_with_extra_tracks_is_kept_automatically(library, run_cli, tmp_path):
+    clip = make_video(library / "clip.mp4", codec="mpeg4")
+    subtitles = tmp_path / "subs.srt"
+    subtitles.write_text("1\n00:00:00,000 --> 00:00:02,000\nHallo\n")
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(clip), "-i", str(subtitles),
+                    "-map", "0", "-map", "1", "-c", "copy", "-c:s", "srt", str(library / "clip subs.mkv")],
+                   check=True)
+    result = run_cli(library.path, "--auto", "--dry-run")
+    assert "Kept         clip subs.mkv" in result.stdout      # has everything clip.mp4 has, and more
+    assert summary(result)["remux"] == 1

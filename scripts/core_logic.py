@@ -20,9 +20,9 @@ from .image_utils import (JXL_SUPPORTED, STRICTNESS_PRESETS, analyze_image,
                          rename_target, score_image, sha256_file)
 from .ui import (Column, StyleUI, badge, confirm, dim, error, info, print_banner,
                 print_menu, print_primary_action, print_table, progress,
-                safe_input, success, truncate, warn)
+                safe_input, success, transient, truncate, warn)
 from .video import describe as describe_video
-from .video import is_video, track_signature, video_stream_hash
+from .video import covering_copy, is_video, stream_hashes, tracks_identical
 from .video import probe as probe_video
 from .video import tools_available as video_tools_available
 from .viewer import open_image_viewer
@@ -283,14 +283,19 @@ def _exact_heading(group: ExactGroup, number: int, total: int, extra: str = "") 
     print(f"\n{StyleUI.BOLD}[{number}/{total}]{StyleUI.RESET} {label} {extra}{detail}")
 
 
-def _exact_table(group: ExactGroup, rel, keep_index: int = 0) -> None:
+def _exact_table(group: ExactGroup, rel, keep_index: int | None = 0) -> None:
+    """*keep_index* None: every file stays."""
     remux = group.kind == "remux"
     rows = []
     for i, f in enumerate(group.files):
         kept = i == keep_index
+        if keep_index is None:
+            action = ("KEEP", StyleUI.GREEN)
+        else:
+            action = ("KEEP", StyleUI.GREEN) if kept else ("DEL", StyleUI.RED)
         row = [("▶", StyleUI.GREEN + StyleUI.BOLD) if kept else " ",
                (f"[{i}]", "key"),
-               ("KEEP", StyleUI.GREEN) if kept else ("DEL", StyleUI.RED),
+               action,
                (rel(f["path"]), StyleUI.BOLD) if kept else rel(f["path"])]
         if remux:
             row += [format_size(f["size"]), (f.get("streams", ""), StyleUI.GRAY)]
@@ -358,13 +363,18 @@ def find_exact_duplicates(files: list[Path], config: dict, stats: Stats, rel,
     return sorted(remaining), groups
 
 
-def _remux_decision(group: ExactGroup, number: int, total: int, config: dict, rel) -> int | None:
-    """Ask which file of a remux group to keep. Returns its index, or None to skip."""
+def _remux_decision(group: ExactGroup, number: int, total: int, config: dict, rel,
+                    covered: bool = True) -> int | None:
+    """Ask which file of a remux group to keep. Returns its index, or None to skip.
+    *covered*: the recommended file contains every track of the others."""
     count = len(group.files)
     others = "1" if count == 2 else f"1-{count - 1}"
     while True:
         _exact_heading(group, number, total, extra=badge("TRACKS DIFFER", StyleUI.YELLOW) + " ")
         dim("The video is identical; the files differ in their audio or subtitle tracks.")
+        if not covered:
+            warn("No file contains all tracks of the others: removing them loses a track "
+                 "(other sound, language or subtitles).")
         _exact_table(group, rel)
         fate = {"trash": "move the other {n} to the trash", "permanent": "permanently delete the other {n}",
                 "dry_run": "delete the other {n} (dry run)"}.get(config["delete_mode"], "remove the other {n}")
@@ -437,11 +447,11 @@ def find_remuxes(files: list[Path], config: dict, confirm_mode: str, stats: Stat
     if candidates:
         with concurrent.futures.ThreadPoolExecutor(min(4, workers)) as pool:
             with progress("Hashing video streams", len(candidates)) as bar:
-                for meta, digest in zip(candidates, pool.map(
-                        lambda m: video_stream_hash(m["path"], m["codec"]), candidates)):
-                    if digest is None:
+                for meta, hashes in zip(candidates, pool.map(stream_hashes, candidates)):
+                    if hashes is None:
                         warn(f"Could not read the video stream of {rel(meta['path'])}; left out.")
                     else:
+                        digest, meta["tracks"] = hashes
                         by_hash[(meta["codec"], digest)].append(meta)
                     bar.advance()
 
@@ -457,11 +467,26 @@ def find_remuxes(files: list[Path], config: dict, confirm_mode: str, stats: Stat
     remaining = [f for f in files if f not in in_groups]
     groups: list[ExactGroup] = []
     for number, members in enumerate(found, 1):
+        # Only byte-identical tracks count as the same; otherwise recommend a file
+        # that contains every track of the others, if there is one.
+        same_tracks = tracks_identical(members)
+        covering = covering_copy(members)
+        if covering:
+            members.insert(0, members.pop(covering))
         group = ExactGroup([{"path": m["path"], "size": m["size"], "mtime_ns": m["mtime_ns"],
                              "streams": describe_video(m)} for m in members], kind="remux")
-        same_tracks = len({track_signature(m) for m in members}) == 1
+        if confirm_mode == "never" and not same_tracks and covering is None:
+            # Nobody is asked, and any choice would lose a track: leave the files alone.
+            _exact_heading(group, number, len(found), extra=badge("TRACKS DIFFER", StyleUI.YELLOW) + " ")
+            _exact_table(group, rel, keep_index=None)
+            warn("  Left alone: the files have other audio or subtitle tracks and none contains all "
+                 "of them. Run without --auto to choose.")
+            stats.groups_skipped += 1
+            remaining.extend(group.paths)
+            continue
         ask = confirm_mode == "always" or (confirm_mode == "uncertain" and not same_tracks)
-        keep_index = _remux_decision(group, number, len(found), config, rel) if ask else 0
+        keep_index = _remux_decision(group, number, len(found), config, rel,
+                                     covered=covering is not None) if ask else 0
         if keep_index is None:
             remaining.extend(group.paths)
             continue
@@ -642,7 +667,7 @@ def find_groups(files: list[Path], config: dict, rel) -> list[Group]:
     executor = concurrent.futures.ProcessPoolExecutor(initializer=ignore_sigint)
     try:
         results = _parallel(executor, analyze_image, files, "Analyzing images",
-                            hash_size, config["format_ranks"])
+                            hash_size, config["format_ranks"], config["prefer_jxl"])
 
         failed = [r for r in results if "error" in r]
         animated = [r for r in results if "error" not in r and r["animated"]]
@@ -728,7 +753,7 @@ def _group_table(group: Group, rel, keep_index: int = 0, done: bool = False) -> 
             action,
             (rel(meta["path"]), StyleUI.BOLD) if kept else rel(meta["path"]),
             (meta["format"], StyleUI.MAGENTA),
-            ("lossless" if meta["lossless"] else "lossy", StyleUI.GRAY),
+            ({True: "lossless", None: "unknown"}.get(meta["lossless"], "lossy"), StyleUI.GRAY),
             f"{meta['width']}x{meta['height']}",
             format_size(meta["size"]),
             (f"{meta['bpp']:.2f}", StyleUI.GRAY),
@@ -765,6 +790,34 @@ def _resolve(group: Group, keep_index: int, config: dict, stats: Stats, rel,
         group.images[keep_index]["path"] = rename_kept(keep, group.paths, config["delete_mode"], stats, rel, ctx)
     group.kept = keep_index
     group.status = "done"
+
+
+def regroup_around(group: Group, keep_index: int, config: dict) -> list[tuple[dict, int | None]] | None:
+    """Make image *keep_index* the group's keeper (#0), comparing every other image
+    with it afresh: so far they were only compared with the recommended image, and
+    two images that are each close to it can still differ from each other by twice
+    the limit. Images above the limit leave the group and stay on disk.
+
+    Returns the images taken out with their new score (None: could not be
+    compared), or None, leaving the group unchanged, if no image is close enough."""
+    keeper = group.images[keep_index]
+    size = config["compare_size"]
+    anchor = _safe_thumbnail(keeper["path"], size)
+    close, far = [], []
+    for i, meta in enumerate(group.images):
+        if i == keep_index:
+            continue
+        score = None
+        if anchor is not None and aspect_ratio_close(keeper, meta, config["max_aspect_diff"]):
+            thumb = _safe_thumbnail(meta["path"], size)
+            if thumb is not None:
+                score = pixel_difference(anchor, thumb)
+        (close if score is not None and score <= group.limit else far).append((meta, score))
+    if not close:
+        return None
+    group.images = [keeper] + [m for m, _ in close]
+    group.diffs = [None] + [d for _, d in close]
+    return far
 
 
 def _keep_description(group: Group, delete_mode: str, rel) -> str:
@@ -869,16 +922,34 @@ def _decision_screen(group: Group, position: str, config: dict, stats: Stats, re
             warn("Unknown option.")
             continue
 
-        if keep_index != 0:  # show the new selection before acting on it
+        reason = None
+        if keep_index != 0:
+            chosen = keep_index
+            with transient(f"Comparing the other images with #{chosen}..."):
+                far = regroup_around(group, chosen, config)
+            if far is None:
+                warn(f"No other image is close enough to #{chosen} (limit {group.limit}) - nothing would be "
+                     f"removed. Keep another image or skip the group.")
+                continue
+            keep_index = 0
+            count = len(group.images)
+            others = "1" if count == 2 else f"1-{count - 1}"
+            renamable = any(rename_target(p, group.paths) for p in group.paths)
             print()
-            _group_table(group, rel, keep_index=keep_index)
+            _group_table(group, rel)  # the new selection, numbered afresh, before acting on it
+            for meta, score in far:
+                shown = "can't be compared" if score is None else f"differs by {score} > {group.limit}"
+                warn(f"  Kept, not a duplicate of #{chosen}: {rel(meta['path'])} ({shown})")
+            reason = (f"visual match (worst diff {group.worst}/{group.limit} to the chosen image), "
+                      f"user kept #{chosen}")
+            ctx.save()
         if config["delete_mode"] == "permanent" and not confirm(
                 f"{StyleUI.RED}Permanently delete {count - 1} file(s)? This cannot be undone.{StyleUI.RESET}"):
             info("Nothing deleted.")
             continue
         if group.status == "skipped":
             stats.groups_skipped -= 1
-        _resolve(group, keep_index, config, stats, rel, ctx, automatic=False)
+        _resolve(group, keep_index, config, stats, rel, ctx, automatic=False, reason=reason)
         return "next"
 
 

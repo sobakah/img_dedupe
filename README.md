@@ -34,7 +34,7 @@ The package is called `img-dedupe` (with a hyphen); the command is `img_dedupe`.
 img_dedupe ~/Pictures --dry-run
 ```
 
-`--dry-run` shows what would be deleted and changes nothing. Afterwards you can carry out exactly what it showed with one keypress, without scanning again.
+`--dry-run` shows what would be deleted and changes nothing. To carry out exactly what it showed, without scanning again, start img_dedupe on the same folder without `--dry-run` and press Enter on the start screen.
 
 The program opens on a **start screen** with the folder, the number of files in scope and all settings. Each setting shows its choices: the current one in bold, the others greyed out. Press a setting's number to switch it, and **Enter** to start.
 
@@ -59,14 +59,14 @@ Hidden folders such as `.thumbnails` or `.Trash` are never scanned, and the home
 
 **Stage 1 – identical files.** Files with identical content (SHA-256) are grouped, images and videos alike; only files of equal size are read, so this is fast.
 
-**Stage 2 – remuxed videos.** ffprobe reads each video's details from its header, and only videos with the same codec, resolution and length are read in full and their video stream compared. Nothing is decoded, and a re-encoded video (other codec, size or quality) is *not* treated as a duplicate. Only the video stream decides: if all copies have the same audio and subtitle tracks, they are handled like identical files; if the tracks differ, you are asked, and the copy with the most tracks is recommended.
+**Stage 2 – remuxed videos.** ffprobe reads each video's details from its header, and only videos with the same codec, resolution and length are read in full and their video stream compared. Nothing is decoded, and a re-encoded video (other codec, size or quality) is *not* treated as a duplicate. The video stream decides whether files belong together; their audio and subtitle tracks are compared by content as well. If all copies have byte-identical tracks, they are handled like identical files. If the tracks differ, you are asked, and a copy that contains every track of the others is recommended (else the one with the most tracks). Without questions (`--auto`, or *when to ask: never*), such a group is only resolved when one copy contains all tracks of the others, so no sound or subtitle track is lost; otherwise all files are left alone.
 
 **Stage 3 – visually identical images** (images only). A quick fingerprint finds pairs that *might* match; then each is compared pixel by pixel with the image that would be kept. Both are shrunk to the same size (at most 512 px) and cut into 8×8-pixel squares; the score is the difference in the *most different* square, from 0 (identical) to 255. One small changed spot, like a date stamp, is therefore enough to keep two images apart. In tests, re-saves and resizes scored up to 15 and real edits 28 or more; the default limit is 20. Images whose shape differs by more than 2% are never compared, and animated images only take part in Stage 1.
 
 **Which copy is kept:**
 
 1. the highest resolution;
-2. lossless over lossy (a small lossy copy never replaces a lossless original; JXL counts as lossless);
+2. lossless over lossy or unknown (a lossy copy never replaces a lossless original). JPEG XL can be either, and Pillow can't tell which, so by default a lossless original (PNG, TIFF, ...) of the same size is kept instead of a JXL copy. With `"prefer_jxl": true` the JXL copy is kept instead (it is smaller; choose this if your JXL files are lossless). TIFF counts as lossless unless it is JPEG-compressed;
 3. the preferred format (`format_ranks`);
 4. a name without a copy number like "(1)";
 5. the less compressed file;
@@ -92,13 +92,13 @@ The groups are numbered (`[3/12]`) and the file to keep is marked `▶`. By defa
 | `p` / `t` | Previous open group / overview of all groups |
 | `q` | Quit (asks whether to keep your progress) |
 
-In `permanent` mode, every deletion asks `[y/N]` with No as the default, so pressing Enter twice never deletes anything permanently.
+In `permanent` mode, you are asked once before the run starts, since identical copies, remuxes and clear matches are then deleted without further questions. Every decision you make on a group's screen asks `[y/N]` again, with No as the default, so pressing Enter twice never deletes anything permanently. `--auto` asks nothing.
 
 **"Not duplicates" marks** (`i`) are saved in a hidden file, `.img_dedupe_ignore.json`, in the scanned folder, so they stay with your pictures. A mark stops applying when one of its files changes. `--no-ignore` shows marked pairs again for one run; deleting the file forgets all marks.
 
 ## Dry runs and saved progress
 
-**After a dry run** you can carry it out for real, with the delete mode from your config (`trash` if the config says `dry_run`):
+**After a dry run** chosen on the start screen (setting `4`), you can carry it out for real right away, with the delete mode from your config (`trash` if the config says `dry_run`). After `--dry-run`, it is saved instead, to be carried out from the start screen in a later start without `--dry-run` (see below):
 
 - **Enter:** apply exactly what the dry run showed, including your choices, without asking again.
 - **`r`:** go through the groups again for real.
@@ -108,6 +108,8 @@ Before anything is deleted, every file is checked against the dry run; files tha
 **Progress is saved** once the duplicate groups are found, in dry runs too: before every question, after every decision, and at least once a second while groups are handled automatically. Each save is written to disk completely before it replaces the previous one. Ctrl+C, closing the terminal, stopping the program from outside or a crash therefore lose at most the last second of automatic decisions, and those are safe to repeat: before resuming, every file is checked against the disk, and anything already removed or changed is left out. Only an interruption *during* the analysis means starting that scan again.
 
 When you open the same folder again, the start screen offers to **resume** (Enter), start a new scan (`n`) or discard the saved session (`x`). A finished dry run stays saved until you carry it out, so you can also do that later: on the start screen, Enter carries it out and `e` goes through its groups again.
+
+**`--dry-run` always wins.** Started with `--dry-run`, nothing is deleted or renamed in that run: the delete mode is locked, a saved real session isn't resumed, a finished dry run isn't carried out, and a new dry run isn't offered for carrying out when it is done. Start without `--dry-run` for that, or press `n` to discard a saved session.
 
 **When resuming**, the groups found by the original scan are used as they are, and the start screen shows which settings can still be changed. Greyed-out rows (stages, videos, subfolders, folder choice) belong to the saved session and are shown with its values. Struck-through choices are unavailable: a *looser* strictness would need a new scan, and a real session can't continue as a dry run. **Stricter works without a new scan**: every group keeps the score of each image, so images above the new limit are simply taken out. Everything else applies: when to ask (`3`, and `uncertain_ratio`), the viewer (`5`) and the rename of "(1)" (`6`). A dry run always resumes as a dry run. A finished dry run is carried out exactly as it showed; only the delete mode (trash or permanent) can be chosen. Press **`n`** to discard the session: all settings are unlocked, and Enter starts a new scan. The summary shows the **totals of the whole session**, including earlier runs.
 
@@ -156,6 +158,7 @@ All settings can be stored in `config.json`; copy `config.example.json` to start
 | `strictness` | `normal` | visual limit: `strict` 12, `normal` 20, `loose` 28 |
 | `max_pixel_diff` | `null` | a number here replaces the strictness preset |
 | `include_videos` | `true` | also check videos |
+| `prefer_jxl` | `false` | `false`: keep a lossless original (PNG, TIFF, ...) instead of a JPEG XL copy of the same size; `true`: keep the JXL copy |
 | `rename_numbered` | `true` | remove "(1)" from kept copies |
 | `save_sessions` | `true` | save progress so it can be resumed |
 | `log_file` | `null` | `null` = default place, `false` = no log, or a file path |

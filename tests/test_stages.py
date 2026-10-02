@@ -1,6 +1,5 @@
 """End to end: the three stages, deleting, the log, renaming and the command line."""
 
-import json
 import os
 
 import pytest
@@ -86,12 +85,17 @@ def test_exclude_leaves_out_subfolders_too(library, run_cli):
     assert (counts["scanned"], counts["exact"]) == (1, 0)
 
 
-def test_the_home_folder_is_refused_in_auto_mode(run_cli, isolated):
+@pytest.mark.parametrize("mode, keys, code", [
+    (["--auto", "--dry-run"], [], 2),     # --auto: refused, exit code 2
+    ([], ["q"], 0),                       # interactive: refused, asked for another folder (q quits)
+])
+def test_the_home_folder_is_refused_with_the_same_message(run_cli, isolated, mode, keys, code):
+    from scripts.app import protected_message
     home = isolated / "home"
     pictures.save(pictures.photo(1), home / "a.png")
-    result = run_cli(home, "--auto", "--dry-run")
-    assert result.returncode == 2
-    assert "Refusing to scan the root or home folder" in result.stdout
+    result = run_cli(home, *mode, keys=keys)
+    assert result.returncode == code
+    assert protected_message(home) in " ".join(result.stdout.split())   # the same text in both modes
 
 
 @pytest.mark.parametrize("args, code", [
@@ -124,3 +128,35 @@ def test_marked_pairs_are_left_out(library, run_cli):
     assert (library / ".img_dedupe_ignore.json").exists()
     assert summary(run_cli(library.path, "--auto", "--dry-run"))["visual"] == 0
     assert summary(run_cli(library.path, "--auto", "--dry-run", "--no-ignore"))["visual"] == 2
+
+
+def test_keeping_another_image_removes_the_others(library, run_cli, isolated):
+    library.photo("a.png", 1)
+    library.variant("a.png", "a.jpg", quality=90)
+    run_cli(library.path, "-i", keys=["", "1", ""])                 # start, keep #1, finish
+    assert library.files() == ["a.jpg"]
+    assert "to the chosen image), user kept #1" in (isolated / "state" / "img_dedupe.log").read_text()
+
+
+def test_permanent_mode_asks_once_before_starting(mixed, run_cli, config_file):
+    config_file({"delete_mode": "permanent"})
+    before = mixed.files()
+    declined = run_cli(mixed.path, "-r", keys=["", "n", "q"])       # start, decline, quit
+    assert "Permanent mode: files are deleted for good" in declined.stdout
+    assert "Nothing started." in declined.stdout
+    assert mixed.files() == before
+    accepted = run_cli(mixed.path, "-r", keys=["", "y", ""])        # start, confirm, quit at the end
+    assert summary(accepted)["exact"] == 1
+    assert "a copy.png" not in " ".join(mixed.files())
+
+
+@pytest.mark.skipif(not __import__("scripts.image_utils").image_utils.JXL_SUPPORTED,
+                    reason="pillow-jxl-plugin not installed")
+@pytest.mark.parametrize("prefer_jxl, kept", [(False, "a.png"), (True, "a.jxl")])
+def test_prefer_jxl_chooses_between_png_and_jpeg_xl(library, run_cli, config_file, prefer_jxl, kept):
+    config_file({"prefer_jxl": prefer_jxl})
+    library.photo("a.png", 1)
+    library.variant("a.png", "a.jxl", quality=90)                    # lossy JPEG XL copy
+    result = run_cli(library.path, "--auto")
+    assert summary(result)["visual"] == 1
+    assert library.files() == [kept]

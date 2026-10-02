@@ -133,6 +133,12 @@ def is_protected(path: Path) -> bool:
     return path == Path.home() or path == Path(path.anchor)
 
 
+def protected_message(path: Path) -> str:
+    """The one message for a refused home or root folder, with and without --auto."""
+    return (f"The home or root folder ({path}) is not scanned, to prevent large-scale deletions "
+            f"by accident. Please choose a specific picture folder.")
+
+
 def resolve_directory(initial: Path | None, index: FolderIndex,
                       allow_cancel: bool = False) -> Path | None:
     """Find a usable folder, prompting until one is given (lrckit behaviour).
@@ -144,8 +150,7 @@ def resolve_directory(initial: Path | None, index: FolderIndex,
         if current is not None:
             resolved = current.expanduser().resolve()
             if is_protected(resolved):
-                warn(f"\nExecution in root or home directory ('{resolved}') detected.")
-                warn("To prevent unintended large-scale deletions, please select a specific picture folder.")
+                error("\n" + protected_message(resolved))
             elif resolved.is_dir():
                 if index.images(resolved):
                     return resolved
@@ -494,11 +499,21 @@ def start_screen(target: Path, config: dict, settings: dict, index: FolderIndex,
         # With a saved session, the settings that decided its groups are fixed;
         # "n" discards the session and unlocks everything for a new scan.
         session = bool(saved and (open_groups or saved_finished))
+        # --dry-run on the command line always wins: a saved real session or a
+        # finished dry run would delete files, so they can't be continued here.
+        forced_dry = bool(config.get("_cli_dry_run"))
+        blocked = None
+        if forced_dry and session and saved_finished:
+            blocked = ("--dry-run was given, so the saved dry run is not carried out. Start img_dedupe "
+                       "without --dry-run to carry it out, or press n to discard it and scan again.")
+        elif forced_dry and session and not saved_dry:
+            blocked = ("--dry-run was given, but the saved session is a real run that would delete files. "
+                       "Start img_dedupe without --dry-run to resume it, or press n to discard it.")
         matching = (saved or {}).get("matching") or {}
         fixed = "fixed by the saved session"
         cap = session_limit(saved) if session and not saved_finished else None
         strictness, strict_current, strict_unavailable, _ = strictness_choices(config, cap)
-        if session and saved_dry and not saved_finished:
+        if forced_dry or (session and saved_dry and not saved_finished):
             mode = "dry_run"
         elif session:
             mode = carry_out_mode(config) if saved_finished else resume_mode(saved, config, quiet=True)
@@ -519,7 +534,9 @@ def start_screen(target: Path, config: dict, settings: dict, index: FolderIndex,
             if cap is not None:
                 dim(f"  {' ' * (_LABEL_WIDTH + 5)}Stricter than the session's limit ({cap}) works without a new scan; looser needs one.")
         _setting("3", "Confirm", CONFIRM_OPTIONS, settings["confirm"])
-        if session and saved_dry and not saved_finished:
+        if forced_dry:
+            _setting("4", "Delete mode", MODE_OPTIONS, "dry_run", locked="--dry-run on the command line")
+        elif session and saved_dry and not saved_finished:
             _setting("4", "Delete mode", MODE_OPTIONS, "dry_run", locked="a dry run resumes as a dry run")
         elif session:
             _setting("4", "Delete mode", MODE_OPTIONS, mode, danger="permanent", unavailable={"dry_run"})
@@ -558,7 +575,10 @@ def start_screen(target: Path, config: dict, settings: dict, index: FolderIndex,
         if mode == "dry_run":
             dim(f"  {' ' * (_LABEL_WIDTH + 5)}Dry runs change nothing and are not logged; their progress is saved.")
 
-        if saved and saved_finished:
+        if blocked:
+            print()
+            warn(blocked)
+        elif saved and saved_finished:
             plan = saved_dry_run(saved, config["rename_numbered"])
             what = _fate(carry_out_mode(config), plan.to_remove)
             if plan.to_rename:
@@ -581,14 +601,16 @@ def start_screen(target: Path, config: dict, settings: dict, index: FolderIndex,
         groups_menu = [("Settings", settings_menu)]
         if saved:
             session_menu = [("n", "Start over: discard the session, unlock all settings")]
-            if saved_finished:
+            if saved_finished and not forced_dry:
                 session_menu.insert(0, ("e", "Review its groups again for real"))
             groups_menu.append(("Session", session_menu))
         groups_menu.append(("Navigate", [("c", "Change directory"), ("q", "Quit")]))
         print_menu(groups_menu)
 
         choice = safe_input(f"{StyleUI.BOLD}Action: {StyleUI.RESET}").strip().lower()
-        if choice == "":
+        if choice == "" and blocked:
+            warn(blocked)
+        elif choice == "":
             if saved and saved_finished:
                 return "apply_saved", saved
             if saved and open_groups:
@@ -600,7 +622,7 @@ def start_screen(target: Path, config: dict, settings: dict, index: FolderIndex,
             exit_script()
         elif choice == "c":
             return "change", None
-        elif choice == "e" and saved and saved_finished:
+        elif choice == "e" and saved and saved_finished and not forced_dry:
             return "review_saved", saved
         elif choice in ("x", "n") and saved:
             if confirm(f"{StyleUI.YELLOW}Discard the saved session for this folder?{StyleUI.RESET}"):
@@ -623,7 +645,9 @@ def start_screen(target: Path, config: dict, settings: dict, index: FolderIndex,
         elif choice == "3":
             settings["confirm"] = _cycle(settings["confirm"], CONFIRM_OPTIONS)
         elif choice == "4":
-            if session and saved_dry and not saved_finished:
+            if forced_dry:
+                warn("--dry-run was given on the command line: this run deletes nothing.")
+            elif session and saved_dry and not saved_finished:
                 warn("A dry run resumes as a dry run. Press n to start over with all settings.")
             else:
                 unavailable = {"dry_run"} if session else set()
@@ -708,6 +732,8 @@ def run_scan(target: Path, config: dict, settings: dict, index: FolderIndex,
     after a dry run (new or resumed) that finished normally.
     """
     dry = config["delete_mode"] == "dry_run"
+    if config.get("_cli_dry_run") and not dry:  # safety net: the screens never get here
+        raise RuntimeError("--dry-run was given, but a real run was about to start")
     applying = from_dry is not None and not review_again
     # Applying asks nothing, so it saves nothing new. The saved dry run is only
     # deleted once applying has finished, so an interrupted apply can be repeated.
@@ -818,7 +844,11 @@ def run_scan(target: Path, config: dict, settings: dict, index: FolderIndex,
         if store is not None:
             if result.has_changes:
                 ctx.save(finished=True)  # kept until it is carried out
-                note = "Dry run saved - it can also be carried out later from the start screen."
+                if config.get("_cli_dry_run"):
+                    note = ("Dry run saved - to carry it out without a rescan, start img_dedupe on this "
+                            "folder again without --dry-run and press Enter on the start screen.")
+                else:
+                    note = "Dry run saved - it can also be carried out later from the start screen."
             else:
                 store.delete()
     elif store is not None:
@@ -863,7 +893,7 @@ def run(initial: Path, base_config: dict, base_settings: dict, auto: bool, exclu
             error(f"Not a directory: {target}")
             return 2
         if is_protected(target):
-            error(f"Refusing to scan the root or home folder ({target}); choose a specific picture folder.")
+            error(protected_message(target))
             return 2
         settings = {**base_settings, "excluded": normalize_excluded(target, exclude)}
         stats, _, _ = run_scan(target, dict(base_config), settings, index, store=None)
@@ -897,12 +927,16 @@ def run(initial: Path, base_config: dict, base_settings: dict, auto: bool, exclu
             run_config = config
             if action == "resume":
                 run_config = {**config, "delete_mode": resume_mode(saved, config)}
+            if run_config["delete_mode"] == "permanent" and not confirm_permanent():
+                continue
             stats, quit_requested, dry_result = run_scan(target, run_config, settings, index, store,
                                                          resume=saved if action == "resume" else None)
             index.clear()  # files were removed or renamed, recount on the next screen
             if quit_requested:
                 exit_script(1 if stats.failed else 0)
-            if dry_result is not None and dry_result.has_changes:
+            # Started with --dry-run, nothing is carried out in this run; the saved
+            # dry run can be carried out by starting again without it.
+            if dry_result is not None and dry_result.has_changes and not config.get("_cli_dry_run"):
                 choice = continue_after_dry_run(target, config, base_config, settings, index, store, dry_result)
 
         if choice is None:
@@ -919,6 +953,17 @@ def run(initial: Path, base_config: dict, base_settings: dict, auto: bool, exclu
                 success(f"Switched to {target}.")
         elif choice != "back":
             exit_script(1 if stats.failed else 0)
+
+
+def confirm_permanent() -> bool:
+    """Asked once before an interactive run deletes permanently: only the groups
+    you decide on are asked about one by one, everything else is not."""
+    warn("\nPermanent mode: files are deleted for good, not moved to the trash. Identical copies, "
+         "remuxes and clear matches are removed without asking; only the groups you decide on ask again.")
+    if confirm(f"{StyleUI.RED}Delete permanently?{StyleUI.RESET}"):
+        return True
+    info("Nothing started.")
+    return False
 
 
 def resume_mode(saved: dict, config: dict, quiet: bool = False) -> str:
@@ -940,9 +985,13 @@ def carry_out_dry_run(target: Path, config: dict, base_config: dict, settings: d
                       mode: str | None = None) -> Stats | None:
     """Apply a dry run (or review its groups again) for real. None if declined."""
     real_mode = mode or real_delete_mode(base_config)
-    if real_mode == "permanent" and not review and not confirm(
-            f"{StyleUI.RED}Permanently delete {dry.to_remove} file(s)? This cannot be undone.{StyleUI.RESET}"):
-        return None
+    if real_mode == "permanent":
+        if review:
+            if not confirm_permanent():
+                return None
+        elif not confirm(f"{StyleUI.RED}Permanently delete {dry.to_remove} file(s)? "
+                         f"This cannot be undone.{StyleUI.RESET}"):
+            return None
     real_config = {**config, "delete_mode": real_mode}
     stats, quit_requested, _ = run_scan(target, real_config, settings, index, store,
                                         from_dry=dry, review_again=review)

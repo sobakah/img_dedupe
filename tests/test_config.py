@@ -79,3 +79,11 @@ def test_broken_json_warns_and_uses_the_defaults(tmp_path):
     config, warnings = load(tmp_path, "{ not json")
     assert config["delete_mode"] == "trash"
     assert warnings
+
+
+def test_prefer_jxl_must_be_true_or_false(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text('{"prefer_jxl": "yes"}')
+    config, warnings = load_config(path)
+    assert config["prefer_jxl"] is False
+    assert any("'prefer_jxl' must be true or false" in w for w in warnings)

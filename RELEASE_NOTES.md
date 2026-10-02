@@ -1,5 +1,23 @@
 # Release notes
 
+## Unreleased
+
+This release fixes the data-safety problems found in an independent code review.
+
+### Fixed
+
+- **`--dry-run` could delete files.** With a saved real session, `--dry-run` and Enter resumed it for real; with a saved dry run, Enter carried it out. Started with `--dry-run`, nothing is deleted or renamed in that run any more, and the delete mode is locked.
+- **Videos with the same picture but other sound were treated as remuxes** and removed without asking, e.g. a dub whose language tag is missing. The audio and subtitle tracks are now compared by content too (MPEG-TS remuxes of AAC still match). Without questions, a group is only resolved when one copy contains every track of the others.
+- **10- and 12-bit pictures stored in 16-bit files** were compared almost black, so a clearly edited version could count as a confident duplicate. They are now scaled from the bit depth they actually use; float pictures no longer all look identical.
+- **Keeping another image than the recommended one** removed the others without comparing them with the image you chose. They are now compared afresh; images too different from it stay on disk.
+- **A lossy JPEG XL copy could replace a lossless PNG original**, because JXL always counted as lossless. By default the lossless original is now kept; the new setting `prefer_jxl` keeps the JXL copy instead. JPEG-compressed TIFFs count as lossy.
+
+### Changed
+
+- **After `--dry-run`, carrying it out is no longer offered right away.** Start again without `--dry-run`: Enter on the start screen carries out the saved dry run without a rescan. A dry run chosen on the start screen (setting 4) is still offered for carrying out when it is done.
+- **If your library has lossless JPEG XL copies next to PNG originals**, the PNGs are now kept. Set `"prefer_jxl": true` in your config to keep the JXL copies as before.
+- **Permanent mode asks once before a run starts**, since automatic decisions delete without further questions. The README claimed every deletion asked first.
+
 ## img_dedupe 1.3
 
 *Released 2026-09-24*

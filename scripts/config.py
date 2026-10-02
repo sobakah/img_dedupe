@@ -24,6 +24,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "hash_max_distance": 28,      # candidate filter only (out of 128 bits); lenient on purpose
     "color": "auto",              # 'auto', 'always', 'never'
     "include_videos": True,       # also find identical and remuxed copies of videos
+    "prefer_jxl": False,          # keep a JPEG XL copy instead of a lossless original (PNG, TIFF, ...)
     "rename_numbered": True,      # strip "(1)" from a kept copy when the group shows it is a copy number
     "save_sessions": True,        # save review progress so it can be resumed (not for dry runs)
     "log_file": None,             # null = project folder or state dir (see README), false = off, or a path
@@ -98,7 +99,8 @@ def _merge(user_config: dict, path: Path, warnings: list[str]) -> dict:
             kind, low, high = NUMERIC_RANGES[key]
             what = "a whole number" if kind is int else "a number"
             warnings.append(f"'{key}' must be {what} from {low} to {high}, using {DEFAULT_CONFIG[key]!r}.")
-        elif key in ("rename_numbered", "save_sessions", "include_videos") and not isinstance(value, bool):
+        elif key in ("rename_numbered", "save_sessions", "include_videos", "prefer_jxl") \
+                and not isinstance(value, bool):
             warnings.append(f"'{key}' must be true or false, using {DEFAULT_CONFIG[key]!r}.")
         elif key == "log_file" and not (value is None or value is False or isinstance(value, str)):
             warnings.append("'log_file' must be null, false or a path, using the default location.")

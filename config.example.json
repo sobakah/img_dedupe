@@ -11,6 +11,7 @@
     "hash_max_distance": 28,
     "color": "auto",
     "include_videos": true,
+    "prefer_jxl": false,
     "rename_numbered": true,
     "save_sessions": true,
     "log_file": null,

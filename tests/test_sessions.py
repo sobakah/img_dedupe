@@ -1,12 +1,10 @@
 """Saved sessions, marks, resuming, and the start screen with a saved session."""
 
-import json
 import os
 from pathlib import Path
 
 import pytest
 
-import pictures
 from conftest import summary
 from scripts import session as session_mod
 from scripts.core_logic import (Group, RunContext, Stats, stats_from_session, tighten_groups,
@@ -166,3 +164,38 @@ def test_n_discards_the_session_and_unlocks_everything(three_groups, run_cli):
     assert "Saved session discarded" in screen
     last = screen.rsplit("[1] Stages", 1)[1]
     assert "(locked)" not in last and "Start scan" in last
+
+
+# --- --dry-run always wins --------------------------------------------------------
+def test_dry_run_does_not_resume_a_real_session(three_groups, run_cli):
+    run_cli(three_groups.path, "-i", keys=["", "q", ""])            # leave a real (trash) session
+    before = three_groups.files()
+    result = run_cli(three_groups.path, "--dry-run", keys=["", "4", "q"])   # Enter, try the mode, quit
+    assert "the saved session is a real run that would delete files" in result.stdout
+    assert "this run deletes nothing" in result.stdout
+    assert "Resuming" not in result.stdout
+    assert three_groups.files() == before
+
+
+def test_dry_run_does_not_carry_out_a_saved_dry_run(three_groups, run_cli):
+    run_cli(three_groups.path, "--dry-run", keys=["", "q"])         # finish a dry run, keep it saved
+    before = three_groups.files()
+    result = run_cli(three_groups.path, "--dry-run", keys=["", "e", "q"])
+    assert "the saved dry run is not carried out" in result.stdout
+    assert three_groups.files() == before
+    carried_out = run_cli(three_groups.path, keys=["", ""])         # without --dry-run, Enter carries it out
+    assert summary(carried_out)["visual"] == 3
+
+
+def test_dry_run_is_not_carried_out_right_after_it_finished(three_groups, run_cli):
+    before = three_groups.files()
+    result = run_cli(three_groups.path, "--dry-run", keys=["", "", ""])   # start, then Enter twice
+    assert "Apply exactly what the dry run showed" not in result.stdout
+    assert "start img_dedupe on this folder again without --dry-run" in result.stdout
+    assert three_groups.files() == before
+
+
+def test_a_dry_run_chosen_on_the_start_screen_can_still_be_carried_out(three_groups, run_cli):
+    result = run_cli(three_groups.path, keys=["4", "", ""])         # trash -> dry run, start, apply
+    assert "Apply exactly what the dry run showed" in result.stdout
+    assert len(three_groups.files()) == 3

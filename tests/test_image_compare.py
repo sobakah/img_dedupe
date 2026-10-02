@@ -1,5 +1,7 @@
 """The pixel comparison: copies must match, edits and other pictures must not."""
 
+import struct
+
 import pytest
 from PIL import Image
 
@@ -71,6 +73,36 @@ def test_different_16_bit_pictures_do_not_look_alike(library):
     assert diff(library / "a.png", library / "b.png") > LIMIT
 
 
+def save_high_bit_depth(img, path, bits: int):
+    """Save an 8-bit picture as 16-bit greyscale PNG using only the lowest *bits* bits,
+    like 12-bit camera or scanner data stored in a 16-bit file."""
+    gray = img.convert("L")
+    values = [px << (bits - 8) for px in gray.tobytes()]
+    Image.frombytes("I;16", gray.size, b"".join(v.to_bytes(2, "little") for v in values)).save(path)
+    return path
+
+
+@pytest.mark.parametrize("bits", [10, 12, 14])
+def test_edits_in_12_bit_pictures_do_not_match(library, bits):
+    original = pictures.photo(1)
+    a = save_high_bit_depth(original, library / "a.png", bits)
+    b = save_high_bit_depth(pictures.with_patch(original), library / "b.png", bits)
+    copy = save_high_bit_depth(original, library / "copy.tif", bits)
+    assert diff(a, b) > LIMIT
+    assert diff(a, copy) == 0
+
+
+def test_float_pictures_are_not_all_black(library):
+    def save_float(img, name):
+        gray = img.convert("L")
+        Image.frombytes("F", gray.size, b"".join(struct.pack("<f", px / 255) for px in gray.tobytes())) \
+            .save(library / name)
+        return library / name
+    a = save_float(pictures.photo(1), "a.tif")
+    b = save_float(pictures.photo(2), "b.tif")
+    assert diff(a, b) > LIMIT
+
+
 def test_lossless_detection(library):
     library.photo("a.png", 1)
     assert is_lossless(library / "a.png", "PNG")
@@ -96,3 +128,56 @@ def test_keeper_ranking(library):
 def test_zero_sized_images_never_match():
     empty = {"width": 0, "height": 0}
     assert aspect_ratio_close(empty, {"width": 10, "height": 10}, 0.02) is False
+
+
+def test_tiff_is_judged_by_its_compression(library):
+    library.photo("a.png", 1)
+    for compression, lossless in (("tiff_lzw", True), ("tiff_adobe_deflate", True), ("jpeg", False)):
+        path = library.variant("a.png", f"{compression}.tif", compression=compression)
+        assert analyze_image(path, 8, {})["lossless"] is lossless, compression
+
+
+def test_jpeg_xl_is_unknown(tmp_path):
+    assert is_lossless(tmp_path / "a.jxl", "JXL") is None
+
+
+def test_prefer_jxl_decides_between_jpeg_xl_and_a_lossless_original():
+    common = {"resolution": 100, "numbered": False, "bpp": 2.0, "age": 1.0}
+    png = {**common, "lossless": True, "lossless_rank": True, "format_rank": 3}
+    jxl = {**common, "lossless": None, "lossless_rank": False, "format_rank": 6}   # default
+    assert score_image(png) > score_image(jxl)
+    assert score_image({**jxl, "lossless_rank": True}) > score_image(png)      # "prefer_jxl": true
+
+
+# --- keeping another image than the recommended one ---------------------------------
+def found_group(library, names, diffs):
+    """A group as Stage 3 would build it; *diffs* are the scores against names[0]."""
+    from scripts.core_logic import Group
+    metas = [analyze_image(library / name, 8, {}) for name in names]
+    return Group(images=metas, diffs=[None, *diffs], limit=LIMIT, borderline_above=LIMIT * 0.8)
+
+
+COMPARE = {"compare_size": 512, "max_aspect_diff": 0.02}
+
+
+def test_another_keeper_is_compared_with_every_image_it_replaces(library):
+    from scripts.core_logic import regroup_around
+    library.photo("a.png", 1)
+    library.variant("a.png", "a.jpg", quality=90)
+    library.variant("a.png", "a edited.jpg", pictures.with_patch, quality=90)
+    # As if "a edited.jpg" had passed against a.png: it must still not be removed
+    # when the user keeps a.jpg instead.
+    group = found_group(library, ["a.png", "a edited.jpg", "a.jpg"], [15, 2])
+    far = regroup_around(group, 2, COMPARE)
+    assert [m["path"].name for m in group.images] == ["a.jpg", "a.png"]
+    assert group.diffs[0] is None and group.diffs[1] <= LIMIT
+    assert [(m["path"].name, score > LIMIT) for m, score in far] == [("a edited.jpg", True)]
+
+
+def test_another_keeper_without_any_close_image_changes_nothing(library):
+    from scripts.core_logic import regroup_around
+    library.photo("a.png", 1)
+    library.variant("a.png", "a edited.jpg", pictures.with_patch, quality=90)
+    group = found_group(library, ["a.png", "a edited.jpg"], [15])
+    assert regroup_around(group, 1, COMPARE) is None
+    assert [m["path"].name for m in group.images] == ["a.png", "a edited.jpg"]

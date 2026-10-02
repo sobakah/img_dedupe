@@ -89,6 +89,31 @@ def sha256_file(path, chunk_size=1 << 20):
     return h.hexdigest()
 
 
+# Bit depths that greyscale pictures with more than 8 bits are usually stored in.
+_DEPTHS = (8, 10, 12, 14, 16)
+
+
+def _to_8_bit(img):
+    """16/32-bit integer and float greyscale to 8 bit, scaled to the bit depth the
+    values actually use.
+
+    A plain convert() clips everything above 255 to white, which makes unrelated
+    16-bit pictures look identical. Dividing by 256 instead squeezes 10- or 12-bit
+    data (stored in a 16-bit file) into the darkest few levels, where an edit
+    scores far below the limit. So the values are scaled from the smallest usual
+    depth that holds them; float pictures from 0-1 when they stay in that range."""
+    if img.mode == "F":
+        _, high = img.getextrema()
+        if high <= 1.0:
+            return img.point(lambda v: v * 255).convert("L")
+    else:
+        img = img.convert("I")
+        _, high = img.getextrema()
+    high = max(0, int(high))
+    bits = next((b for b in _DEPTHS if high < 1 << b), high.bit_length())
+    return img.point(lambda v: v * (256 / (1 << bits))).convert("L")
+
+
 def _normalize(img, max_side):
     """Return an RGB image, orientation-corrected, colour-managed, with transparency
     flattened, downscaled so its longest side is at most `max_side`."""
@@ -97,12 +122,8 @@ def _normalize(img, max_side):
     icc = img.info.get("icc_profile")
     img = ImageOps.exif_transpose(img)
 
-    # 16/32-bit greyscale: a plain convert("RGB") clips everything above 255 to white,
-    # which makes unrelated 16-bit PNGs look identical.
-    if img.mode in ("I", "I;16", "I;16B", "I;16L", "I;16N"):
-        img = img.convert("I").point(lambda v: v * (1 / 256)).convert("L")
-    elif img.mode == "F":
-        img = img.convert("L")
+    if img.mode in ("I", "I;16", "I;16B", "I;16L", "I;16N", "F"):
+        img = _to_8_bit(img)
 
     img.thumbnail((max_side, max_side), Image.LANCZOS, reducing_gap=3.0)
 
@@ -158,12 +179,23 @@ def _webp_is_lossless(path):
     return False
 
 
-def is_lossless(path, fmt):
-    """Best-effort guess whether the file stores pixels without lossy compression.
-    JXL is assumed lossless: most JXL libraries are lossless conversions or JPEG
-    transcodes, which Pillow cannot distinguish from lossy JXL."""
-    if fmt in ("PNG", "BMP", "TIFF", "JXL"):
+# TIFF compressions that lose detail; all others (none, LZW, Deflate, PackBits,
+# CCITT, ...) keep every pixel. Pillow reports them in img.info["compression"].
+_LOSSY_TIFF = {"jpeg", "tiff_jpeg", "webp", "tiff_sgilog", "tiff_sgilog24"}
+
+
+def is_lossless(path, fmt, compression=None):
+    """Best-effort guess whether the file stores pixels without lossy compression:
+    True, False, or None when it can't be told.
+
+    JPEG XL can be either, and Pillow can't tell which, so it is None ("unknown").
+    TIFF is judged by its *compression*."""
+    if fmt in ("PNG", "BMP"):
         return True
+    if fmt == "TIFF":
+        return compression not in _LOSSY_TIFF
+    if fmt == "JXL":
+        return None
     if fmt == "WEBP":
         try:
             return _webp_is_lossless(path)
@@ -172,9 +204,12 @@ def is_lossless(path, fmt):
     return False  # JPEG, AVIF, GIF (palette-reduced) and unknown formats
 
 
-def analyze_image(path, hash_size, format_ranks):
+def analyze_image(path, hash_size, format_ranks, prefer_jxl=False):
     """Collect metadata and perceptual hash in one decode. Runs in worker processes.
-    Returns a dict; on failure the dict contains an 'error' key."""
+    Returns a dict; on failure the dict contains an 'error' key.
+
+    *prefer_jxl* (config "prefer_jxl"): rank JPEG XL files like lossless ones, so
+    a JXL copy is kept instead of a lossless original (PNG, TIFF, ...)."""
     try:
         stat = path.stat()
         with Image.open(path) as img:
@@ -182,9 +217,11 @@ def analyze_image(path, hash_size, format_ranks):
             animated = getattr(img, "n_frames", 1) > 1
             width, height = img.size
             orientation = img.getexif().get(0x0112, 1)
+            compression = img.info.get("compression")
             if orientation in (5, 6, 7, 8):  # displayed rotated by 90 degrees
                 width, height = height, width
             norm = _normalize(img, 256)
+        lossless = is_lossless(path, fmt, compression)
         resolution = width * height
         return {
             'path': path,
@@ -193,7 +230,8 @@ def analyze_image(path, hash_size, format_ranks):
             'resolution': resolution,
             'format': fmt,
             'format_rank': format_ranks.get(fmt, -1),
-            'lossless': is_lossless(path, fmt),
+            'lossless': lossless,
+            'lossless_rank': lossless is True or (fmt == "JXL" and prefer_jxl),
             'bpp': (stat.st_size * 8) / resolution if resolution else 0.0,
             'age': stat.st_mtime,
             'size': stat.st_size,
@@ -245,9 +283,11 @@ def aspect_ratio_close(a, b, tolerance):
 
 
 def score_image(meta):
-    """Higher is better: resolution, then lossless over lossy (a lossy re-encode must
-    never beat its lossless master), then format preference, then a name without
+    """Higher is better: resolution, then lossless over lossy or unknown (a lossy
+    re-encode must never beat its lossless master; JXL counts as lossless here
+    with "prefer_jxl"), then format preference, then a name without
     a copy number ("photo.jpg" beats "photo (1).jpg"), then bits-per-pixel (less
     compressed, meaningful within one format), then oldest file."""
-    return (meta['resolution'], meta['lossless'], meta['format_rank'], not meta['numbered'],
+    return (meta['resolution'], meta.get('lossless_rank', meta['lossless'] is True), meta['format_rank'],
+            not meta['numbered'],
             meta['bpp'], -meta['age'])
