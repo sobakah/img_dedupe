@@ -1,6 +1,6 @@
 # Release notes
 
-## Unreleased
+## img_dedupe 1.4
 
 This release fixes the data-safety problems found in an independent code review.
 
